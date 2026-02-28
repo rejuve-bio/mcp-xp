@@ -3,10 +3,15 @@ from __future__ import annotations
 import logging
 import re
 from collections import deque
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import networkx as nx
 from neo4j import GraphDatabase
+
+from app.bioblend_server.GraphRAG.config import (
+    NODE_ID_FIELDS,
+    SCHEMA_RELATIONSHIPS,
+)
 
 
 SAFE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -18,17 +23,66 @@ def _validate_cypher_name(name: str) -> str:
     return name
 
 
+def _canonical_id(
+    label: str,
+    properties: Dict[str, Any],
+    fallback_id: str = "",
+) -> str:
+    """Build a deterministic ``Label:value`` identifier for a node.
+
+    Tries each field listed in :data:`NODE_ID_FIELDS` for the given *label*
+    until a non-empty value is found.  Falls back to ``Label:<fallback_id>``
+    when nothing else is available.
+    """
+    id_fields = NODE_ID_FIELDS.get(label, ["id"])
+    for field_name in id_fields:
+        value = properties.get(field_name)
+        if value is not None and str(value).strip():
+            return f"{label}:{value}"
+    if fallback_id:
+        return f"{label}:{fallback_id}"
+    return f"{label}:unknown"
+
+
+def _normalize_rel_types(rel_types: Optional[List[str]]) -> Optional[Set[str]]:
+    """Convert an optional list of relationship type strings to a *set*.
+
+    Returns ``None`` when no filtering is requested (empty or ``None`` input).
+    """
+    if not rel_types:
+        return None
+    return set(rel_types)
+
+
+# ---------------------------------------------------------------------------
+# Relationship schema lookup helpers
+# ---------------------------------------------------------------------------
+
+_OUTGOING_RELS: Dict[str, List[Tuple[str, str]]] = {}
+_INCOMING_RELS: Dict[str, List[Tuple[str, str]]] = {}
+
+for _src, _rel, _tgt in SCHEMA_RELATIONSHIPS:
+    _OUTGOING_RELS.setdefault(_src, []).append((_rel, _tgt))
+    _INCOMING_RELS.setdefault(_tgt, []).append((_rel, _src))
+
+
 class Neo4jGraphConnector:
-    """Minimal Neo4j connector with the same API as the in-memory connector."""
+    """Neo4j connector for the GraphRAG pipeline.
+
+    Provides graph-traversal primitives (BFS neighbours, subgraph extraction)
+    as well as schema-aware multi-hop expansion aligned with the Galaxy
+    bioinformatics knowledge graph schema.
+    """
 
     def __init__(self, uri: str, user: str, password: str, database: str | None = None) -> None:
-
         self.logger = logging.getLogger(self.__class__.__name__)
         self.database = database
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
 
     def close(self) -> None:
         self.driver.close()
+
+    # Node lookup
 
     def get_node_by_id(self, node_label: str, node_id: str) -> Optional[Dict[str, Any]]:
         if not node_id:
@@ -81,6 +135,8 @@ class Neo4jGraphConnector:
         rows = self._run(query, {"value": value})
         return [self._row_to_node(row, snapshot=None) for row in rows]
 
+     # BFS neighbours (generic)
+
     def neighbors(
         self, node_id: str, depth: int, rel_types: Optional[List[str]] = None
     ) -> Dict[str, Dict[str, Any]]:
@@ -108,6 +164,116 @@ class Neo4jGraphConnector:
             current_id: self._node_to_dict(snapshot, current_id, distance=distance)
             for current_id, distance in ordered
         }
+
+    # Schema-aware multi-hop expansion
+
+    def expand_from_seeds(
+        self,
+        seed_node_ids: List[str],
+        max_hops: int = 3,
+        allowed_rels: Optional[List[str]] = None,
+        max_nodes: int = 200,
+    ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+        """Controlled multi-hop traversal following the graph schema.
+
+        Performs BFS from *seed_node_ids* up to *max_hops* hops, only
+        following relationship types declared in the schema (or further
+        restricted by *allowed_rels*).  Prevents infinite loops via a
+        visited set and caps total nodes at *max_nodes*.
+
+        Returns:
+            A tuple ``(nodes_dict, edges_list)`` where *nodes_dict* maps
+            canonical node-id → node dict, and *edges_list* contains
+            ``{source, target, type, properties}`` dicts.
+        """
+        snapshot = self._snapshot_graph()
+        allowed = _normalize_rel_types(allowed_rels)
+
+        visited: Dict[str, Dict[str, Any]] = {}
+        edges: List[Dict[str, Any]] = []
+        edge_set: Set[Tuple[str, str, str]] = set()
+        queue: deque[Tuple[str, int]] = deque()
+
+        # Resolve seeds
+        for seed in seed_node_ids:
+            resolved = self._resolve_node_id(snapshot, seed)
+            if resolved and resolved not in visited:
+                visited[resolved] = self._node_to_dict(snapshot, resolved, distance=0)
+                queue.append((resolved, 0))
+            if len(visited) >= max_nodes:
+                break
+
+        while queue and len(visited) < max_nodes:
+            current_id, current_hop = queue.popleft()
+            if current_hop >= max_hops:
+                continue
+
+            current_label = visited[current_id].get("label", "")
+
+            # Outgoing edges following schema
+            for neighbor, _, rel_type, edge_data in snapshot.out_edges(
+                current_id, keys=True, data=True
+            ):
+                rel = str(edge_data.get("type", "RELATED_TO"))
+                if allowed and rel not in allowed:
+                    continue
+                # Check schema compliance
+                neighbor_label = snapshot.nodes[neighbor].get("label", "") if neighbor in snapshot else ""
+                if not self._is_schema_valid(current_label, rel, neighbor_label):
+                    continue
+                edge_key = (current_id, neighbor, rel)
+                if edge_key not in edge_set:
+                    edge_set.add(edge_key)
+                    edges.append({
+                        "source": current_id,
+                        "target": neighbor,
+                        "type": rel,
+                        "properties": edge_data.get("properties", {}),
+                    })
+                if neighbor not in visited and len(visited) < max_nodes:
+                    visited[neighbor] = self._node_to_dict(
+                        snapshot, neighbor, distance=current_hop + 1
+                    )
+                    queue.append((neighbor, current_hop + 1))
+
+            # Incoming edges following schema (reversed)
+            for source, _, _, edge_data in snapshot.in_edges(
+                current_id, keys=True, data=True
+            ):
+                rel = str(edge_data.get("type", "RELATED_TO"))
+                if allowed and rel not in allowed:
+                    continue
+                source_label = snapshot.nodes[source].get("label", "") if source in snapshot else ""
+                if not self._is_schema_valid(source_label, rel, current_label):
+                    continue
+                edge_key = (source, current_id, rel)
+                if edge_key not in edge_set:
+                    edge_set.add(edge_key)
+                    edges.append({
+                        "source": source,
+                        "target": current_id,
+                        "type": rel,
+                        "properties": edge_data.get("properties", {}),
+                    })
+                if source not in visited and len(visited) < max_nodes:
+                    visited[source] = self._node_to_dict(
+                        snapshot, source, distance=current_hop + 1
+                    )
+                    queue.append((source, current_hop + 1))
+
+        edges.sort(key=lambda e: (e["source"], e["target"], e["type"]))
+        return visited, edges
+
+    @staticmethod
+    def _is_schema_valid(source_label: str, rel_type: str, target_label: str) -> bool:
+        """Return True if the relationship is declared in the schema."""
+        if not source_label or not target_label:
+            return True  # Allow if labels are unknown (defensive)
+        return (source_label, rel_type, target_label) in {
+            (s, r, t) for s, r, t in SCHEMA_RELATIONSHIPS
+        }
+
+    # Subgraph extraction
 
     def extract_subgraph(
         self, seed_node_ids: List[str], max_nodes: int, rel_filter: Optional[List[str]] = None
@@ -152,6 +318,8 @@ class Neo4jGraphConnector:
                 )
         edges.sort(key=lambda item: (item["source"], item["target"], item["type"]))
         return nodes, edges
+
+    # Internal helpers
 
     def _snapshot_graph(self) -> nx.MultiDiGraph:
         graph = nx.MultiDiGraph()
