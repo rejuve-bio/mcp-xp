@@ -13,7 +13,6 @@ class InformerSemanticAdapter:
     _ID_FIELDS = {
         "tool": "tool_id",
         "workflow": "workflow_id",
-        "dataset": "dataset_id",
     }
 
     def __init__(
@@ -29,7 +28,7 @@ class InformerSemanticAdapter:
         """
         self.searcher = semantic_searcher
         self.entity_types = entity_types or ["tool", "workflow"]
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.log = logging.getLogger(self.__class__.__name__)
 
     async def search(
         self,
@@ -52,31 +51,39 @@ class InformerSemanticAdapter:
             A list of normalised hit dicts sorted by score descending,
             capped at *top_k*.
         """
-        if entities_by_type is None:
-            entities_by_type = {}
+        try:
+            self.log.info(f"Starting semantic search for query: '{query}', top_k: {top_k}, entity_types: {self.entity_types}")
 
-        all_hits: List[Dict[str, Any]] = []
+            if entities_by_type is None:
+                entities_by_type = {}
 
-        for entity_type in self.entity_types:
-            entities = entities_by_type.get(entity_type, [])
-            try:
-                raw_results = await self.searcher.search(
-                    query=query,
-                    entity_type=entity_type,
-                    entities=entities,
-                )
-                normalised = self._normalise_results(raw_results, entity_type)
-                all_hits.extend(normalised)
-            except Exception as exc:
-                self.logger.warning(
-                    "Semantic search failed for entity_type=%s: %s",
-                    entity_type,
-                    exc,
-                )
+            all_hits: List[Dict[str, Any]] = []
 
-        # Sort by score descending, then truncate
-        all_hits.sort(key=lambda h: -h.get("score", 0.0))
-        return all_hits[:top_k]
+            for entity_type in self.entity_types:
+                try:
+                    self.log.debug(f"Searching for entity_type: {entity_type}")
+                    entities = entities_by_type.get(entity_type, [])
+                    raw_results = await self.searcher.search(
+                        query=query,
+                        entity_type=entity_type,
+                        entities=entities,
+                    )
+                    normalised = self._normalise_results(raw_results, entity_type)
+                    all_hits.extend(normalised)
+                except Exception as exc:
+                    self.log.warning(
+                        f"Semantic search failed for entity_type={entity_type}: {exc}",
+                        exc_info=True,
+                    )
+
+            # Sort by score descending, then truncate
+            all_hits.sort(key=lambda h: -h.get("score", 0.0))
+            result = all_hits[:top_k]
+            self.log.info(f"Semantic search completed with {len(result)} hits")
+            return result
+        except Exception as error:
+            self.log.error(f"Error in search: {error}", exc_info=True)
+            return []
 
     def _normalise_results(
         self,
@@ -84,31 +91,42 @@ class InformerSemanticAdapter:
         entity_type: str,
     ) -> List[Dict[str, Any]]:
         """Map Informer result dicts to GraphRAG hit format."""
-        id_field = self._ID_FIELDS.get(entity_type, "id")
-        hits: List[Dict[str, Any]] = []
+        try:
+            self.log.info(f"Normalising {len(raw_results)} results for entity_type: {entity_type}")
+            id_field = self._ID_FIELDS.get(entity_type, "id")
+            hits: List[Dict[str, Any]] = []
 
-        for item in raw_results:
-            entity_id = str(item.get(id_field, item.get("name", "")))
-            score = float(item.get("score", 0.0))
-            text = str(item.get("content", item.get("description", "")))
+            for item in raw_results:
+                try:
+                    self.log.debug(f"Processing item: {item}")
+                    entity_id = str(item.get(id_field, item.get("name", "")))
+                    score = float(item.get("score", 0.0))
+                    text = str(item.get("content", item.get("description", "")))
 
-            meta: Dict[str, Any] = {
-                "name": item.get("name", ""),
-                "entity_type": entity_type,
-                "source": item.get("source", "unknown"),
-            }
-            # Preserve original ID fields for downstream mapping
-            if id_field in item:
-                meta[id_field] = item[id_field]
-            for extra_key in ("description", "owner", "version", "tool_shed_url"):
-                if extra_key in item:
-                    meta[extra_key] = item[extra_key]
+                    meta: Dict[str, Any] = {
+                        "name": item.get("name", ""),
+                        "entity_type": entity_type,
+                        "source": item.get("source", "unknown"),
+                    }
+                    # Preserve original ID fields for downstream mapping
+                    if id_field in item:
+                        meta[id_field] = item[id_field]
+                    for extra_key in ("description", "owner", "version", "tool_shed_url"):
+                        if extra_key in item:
+                            meta[extra_key] = item[extra_key]
 
-            hits.append({
-                "id": entity_id,
-                "text": text,
-                "score": score,
-                "meta": meta,
-            })
+                    hits.append({
+                        "id": entity_id,
+                        "text": text,
+                        "score": score,
+                        "meta": meta,
+                    })
+                except Exception as error:
+                    self.log.error(f"Error processing item {item}: {error}", exc_info=True)
+                    continue
 
-        return hits
+            self.log.info(f"Normalised {len(hits)} hits")
+            return hits
+        except Exception as error:
+            self.log.error(f"Error in _normalise_results: {error}", exc_info=True)
+            return []
