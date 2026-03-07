@@ -1,10 +1,3 @@
-"""Adapter wrapping Informer's SemanticSearcher for the GraphRAG pipeline.
-
-This module exposes :class:`InformerSemanticAdapter`, a thin async wrapper
-that delegates vector search to the Informer's :class:`SemanticSearcher`
-and normalises results into the format expected by :class:`GraphRetriever`.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -14,24 +7,7 @@ from app.bioblend_server.informer.search.semantic_searcher import SemanticSearch
 
 
 class InformerSemanticAdapter:
-    """Wraps Informer's ``SemanticSearcher`` for GraphRAG consumption.
-
-    GraphRAG expects semantic hits in the shape::
-
-        [
-          {
-            "id":    "<entity_id>",
-            "text":  "<content snippet>",
-            "score": 0.87,
-            "meta":  { "name": "...", "tool_id": "...", ... }
-          },
-          ...
-        ]
-
-    The Informer's searcher returns dicts whose keys vary by entity type
-    (``tool_id`` / ``workflow_id`` / ``dataset_id``).  This adapter maps
-    those results into a uniform shape.
-    """
+    """ Wraps Informer's ``SemanticSearcher`` for GraphRAG consumption. """
 
     # Entity-specific ID field names in Informer results
     _ID_FIELDS = {
@@ -61,7 +37,8 @@ class InformerSemanticAdapter:
         top_k: int = 10,
         entities_by_type: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> List[Dict[str, Any]]:
-        """Run semantic search across configured entity types.
+        """
+        Run semantic search across configured entity types.
 
         Args:
             query: Natural-language search query.
