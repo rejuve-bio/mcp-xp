@@ -1,304 +1,353 @@
-"""Schema-aware context builder for the GraphRAG pipeline.
-
-Assembles a structured, token-efficient context string from ranked nodes
-and graph-expanded entities, respecting the Galaxy knowledge-graph schema.
-"""
-
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List
+from app.bioblend_server.GraphRAG.config import GraphRAGConfig
 
-from app.bioblend_server.GraphRAG.config import GraphRAGConfig, SCHEMA_RELATIONSHIPS
-
-
-# Fields whose values are used to produce a per-node summary line
 SUMMARY_FIELDS = ["readme_content", "description", "help", "annotation", "name"]
-
-# Order in which entity-type sections are emitted
-_SECTION_ORDER = [
-    "Category", "Workflow", "Step", "Tool",
-    "Input", "Output", "ToolInput", "ToolOutput",
-]
 
 
 class ContextBuilder:
-    """Char-budgeted, schema-aware context serialiser."""
+    """Formats structured dict payloads into clean, hierarchical Markdown contexts."""
 
     def __init__(self, config: GraphRAGConfig) -> None:
         self.config = config
 
-
     def build_context(
         self,
-        ranked_nodes: List[Dict[str, Any]],
-        subgraph: Dict[str, Any],
-        max_chars: int,
-        expanded_nodes: Dict[str, Dict[str, Any]] | None = None,
-        expanded_edges: List[Dict[str, Any]] | None = None,
+        context_payloads: List[Dict[str, Any]],
     ) -> str:
-        """Build a structured context payload.
+        """Translates targeted Cypher payloads into token-budgeted text.
 
-        The output groups entities by type (Workflows → Steps → Tools →
-        Inputs/Outputs → Categories), orders steps by ``NEXT_STEP``
-        edges, includes tool metadata, and deduplicates entities.
+        Assembles dedicated templates for Workflows, Tools, and Steps according to
+        what `neo4j_connector` resolved.
 
         Args:
-            ranked_nodes: Ranked candidate list from the hybrid ranker.
-            subgraph: ``{"nodes": [...], "edges": [...]}`` from the
-                connector's ``extract_subgraph``.
-            max_chars: Hard character budget for the final string.
-            expanded_nodes: Nodes from schema-aware expansion (optional).
-            expanded_edges: Edges from schema-aware expansion (optional).
+            context_payloads: List of dictionaries matching the target fetcher output.
 
         Returns:
-            A deterministic, token-efficient context string.
+            A string containing human/LLM-readable graph representation.
         """
-        # Merge all available nodes/edges (dedup by id)
-        all_nodes, all_edges = self._merge_graph_data(
-            subgraph, expanded_nodes, expanded_edges
-        )
-        node_lookup: Dict[str, Dict[str, Any]] = {n["id"]: n for n in all_nodes}
+        if not context_payloads:
+            return "No matching context found."
 
-        # Build ranked-node id set for priority inclusion
-        ranked_ids: Set[str] = {
-            entry["node"]["id"] for entry in ranked_nodes
-        }
-
-        # Group nodes by label
-        grouped = self._group_by_label(all_nodes)
-
-        # Order steps using NEXT_STEP edges
-        if "Step" in grouped:
-            grouped["Step"] = self._order_steps(grouped["Step"], all_edges)
-
-        # Assemble sections
         sections: List[str] = []
 
-        # 1. Ranked-node highlights
-        ranked_section = self._ranked_section(ranked_nodes, node_lookup, all_edges)
-        if ranked_section:
-            sections.append(ranked_section)
+        seen_entities = set()  # Dedup by internal_id
+        seen_names = set()     # Dedup tools/steps by name to avoid version spam
 
-        # 2. Entity-type sections
-        for label in _SECTION_ORDER:
-            nodes = grouped.get(label, [])
-            if not nodes:
+        for payload in context_payloads:
+            seed = payload.get("_source_seed", {})
+            seed_id = seed.get("id", "Unknown")
+            if seed_id in seen_entities:
                 continue
-            section = self._entity_section(label, nodes, all_edges, node_lookup)
-            if section:
+            seen_entities.add(seed_id)
+            
+            label = seed.get("label")
+            section = ""
+
+            # For Tool and Step payloads, dedup by entity name so different
+            # versions of the same tool don't flood the context.
+            if label == "Tool":
+                tool_name = (payload.get("tool") or {}).get("name")
+                if tool_name and tool_name in seen_names:
+                    continue
+                if tool_name:
+                    seen_names.add(tool_name)
+                section = self._format_tool(payload)
+            elif label == "Step":
+                step_name = (payload.get("step") or {}).get("name")
+                if step_name and step_name in seen_names:
+                    continue
+                if step_name:
+                    seen_names.add(step_name)
+                section = self._format_step(payload)
+            elif label == "Workflow":
+                section = self._format_workflow(payload)
+            elif payload.get("analytics_type") == "top_tools":
+                section = self._format_analytics_top_tools(payload)
+            elif payload.get("analytics_type") == "tool_communities":
+                section = self._format_analytics_communities(payload)
+            elif payload.get("analytics_type") == "workflow_comparison":
+                section = self._format_workflow_comparison(payload)
+            elif payload.get("analytics_type") == "tool_connection":
+                section = self._format_tool_connection(payload)
+            elif payload.get("analytics_type") == "category_drilldown":
+                section = self._format_category_drilldown(payload)
+            else:
+                pass # Catch all
+                
+            if section and section not in sections:
                 sections.append(section)
 
-        # 3. Relationship summary
-        rel_section = self._relationship_section(all_edges, node_lookup)
-        if rel_section:
-            sections.append(rel_section)
-
-        # Combine & truncate
-        context = "\n\n".join(sections)
-        if len(context) > max_chars:
-            context = context[: max(0, max_chars - 3)].rstrip() + "..."
+        context = "\n\n---\n\n".join(sections)
+            
         return context
 
-    # ------------------------------------------------------------------
-    # Section builders
-    # ------------------------------------------------------------------
+    # Formatting Templates
+    def _format_workflow(self, payload: Dict[str, Any]) -> str:
+        """Format a Workflow and its execution graph."""
+        wf = payload.get("workflow", {})
+        steps = payload.get("steps", [])
+        
+        lines = [f"[WORKFLOW] {wf.get('name', 'Unknown')}"]
+        if summary := self._get_summary(wf):
+            lines.append(f"  Summary: {summary}")
+            
+        if not steps:
+            lines.append("  (No attached steps defined)")
+            return "\n".join(lines)
+            
+        lines.append("\n  - [Execution Steps]:")
+        for i, step_dict in enumerate(steps, 1):
+            props = step_dict.get("properties", {})
+            lines.append(f"    Step {i}: {props.get('name', 'Unnamed Step')}")
+            if annotation := props.get("annotation"):
+                lines.append(f"      Annotation: {self._format_value(annotation, 100)}")
+            
+            # Tools 
+            for tool in step_dict.get("tools", []):
+                if tool_name := tool.get('name'):
+                    lines.append(f"      - Uses Tool: {tool_name}")
+            
+            # Input Needs
+            for inp in step_dict.get("inputs", []):
+                if inp_name := inp.get('name'):
+                    lines.append(f"      - Requires Input: {inp_name} - {self._format_value(inp.get('description', ''), 60)}")
+                
+            # Generated Artifacts
+            for out in step_dict.get("outputs", []):
+                if out_name := out.get('name'):
+                    lines.append(f"      - Generates Output: {out_name} - {self._format_value(out.get('description', ''), 60)}")
 
-    def _ranked_section(
-        self,
-        ranked_nodes: List[Dict[str, Any]],
-        node_lookup: Dict[str, Dict[str, Any]],
-        edges: List[Dict[str, Any]],
-    ) -> str:
-        """Top-ranked nodes with scores."""
-        if not ranked_nodes:
-            return ""
-        lines = ["[Top Ranked Matches]"]
-        for entry in ranked_nodes[:8]:
-            node = entry["node"]
-            label = node.get("label", "Unknown")
-            display_id = self._display_id(node["id"])
-            summary = self._summary(node.get("properties", {}))
-            score = entry.get("score", 0.0)
-            reason = entry.get("reason", "graph_candidate")
-            lines.append(
-                f"- {label}|{display_id}: {summary} "
-                f"(score={score:.4f}, reason={reason})"
-            )
         return "\n".join(lines)
 
-    def _entity_section(
-        self,
-        label: str,
-        nodes: List[Dict[str, Any]],
-        edges: List[Dict[str, Any]],
-        node_lookup: Dict[str, Dict[str, Any]],
-    ) -> str:
-        """Emit a section for a single entity type."""
-        lines = [f"[{label}s]"]
-        for node in nodes[:12]:  # cap per section
-            block = self._node_block(node, edges, node_lookup)
-            lines.append(block)
+    def _format_tool(self, payload: Dict[str, Any]) -> str:
+        """Format a Tool, its standard IO, and places it's used."""
+
+        tool = payload.get("tool", {})
+        inputs = payload.get("tool_inputs", [])
+        outputs = payload.get("tool_outputs", [])
+        workflows = payload.get("workflows", [])
+        
+        lines = [f"[TOOL] {tool.get('name', 'Unknown')}"]
+        if summary := self._get_summary(tool):
+            lines.append(f"  Summary: {summary}")
+        if ver := tool.get("version"):
+            lines.append(f"  Version: {ver}")
+            
+        if inputs or outputs:
+            lines.append("\n  - [Tool Specifications]:")
+            for inp in inputs:
+                lines.append(f"    - Input: {inp.get('input_name')} [{inp.get('input_type')}]")
+            for out in outputs:
+                lines.append(f"    - Output: {out.get('output_name')} [{out.get('output_format')}]")
+                
+        if workflows:
+            valid_wfs = [wf.get('name') for wf in workflows if wf.get('name')]
+            if valid_wfs:
+                lines.append("\n  - [Used in Workflows]:")
+                for wf_name in valid_wfs:
+                    lines.append(f"    - Workflow: {wf_name}")
+
         return "\n".join(lines)
 
-    def _node_block(
-        self,
-        node: Dict[str, Any],
-        edges: List[Dict[str, Any]],
-        node_lookup: Dict[str, Dict[str, Any]],
-    ) -> str:
-        """Compact representation of a single node."""
-        label = node.get("label", "Unknown")
-        display_id = self._display_id(node["id"])
-        props = node.get("properties", {})
-        summary = self._summary(props)
+    def _format_step(self, payload: Dict[str, Any]) -> str:
+        """Format a Step in isolation, locating it in its workflow."""
+        step = payload.get("step", {})
+        wf = payload.get("workflow", {})
+        tool = payload.get("tool", {})
+        inputs = payload.get("inputs", [])
+        outputs = payload.get("outputs", [])
+        
+        lines = [f"[STEP] {step.get('name', 'Unknown')}"]
+        
+        if wf_name := wf.get('name'):
+            lines.append(f"  Part of Workflow: {wf_name}")
+            
+        if tool_name := tool.get('name'):
+            lines.append(f"  Executes Tool: {tool_name}")
+            if text := self._get_summary(tool):
+                lines.append(f"    Tool Description: {text}")
+                
+        if inputs:
+            lines.append("\n  - Required Workflow Inputs:")
+            for inp in inputs:
+                if inp_name := inp.get('name'):
+                    lines.append(f"    - {inp_name} - {self._format_value(inp.get('description', ''), 60)}")
+                
+        if outputs:
+            lines.append("\n  - Generated Workflow Outputs:")
+            for out in outputs:
+                if out_name := out.get('name'):
+                    val = self._format_value(out.get('description', ''), 60)
+                    lines.append(f"    - {out_name}" + (f" - {val}" if val else ""))
 
-        parts = [f"  {label}|{display_id}: {summary}"]
-
-        # Key properties (exclude summary fields to avoid repetition)
-        prop_lines: List[str] = []
-        for key in sorted(props.keys()):
-            if key in SUMMARY_FIELDS:
-                continue
-            prop_lines.append(f"    {key}: {self._format_value(props[key], 80)}")
-            if len(prop_lines) >= 6:
-                break
-        if prop_lines:
-            parts.extend(prop_lines)
-
-        # Outgoing relationships (compact)
-        outgoing = [
-            e for e in edges
-            if e.get("source") == node["id"] and e.get("target") in node_lookup
-        ]
-        for edge in outgoing[:3]:
-            target = node_lookup[edge["target"]]
-            parts.append(
-                f"    → {edge['type']} → {target.get('label','?')}|"
-                f"{self._display_id(edge['target'])}"
-            )
-
-        return "\n".join(parts)
-
-    def _relationship_section(
-        self,
-        edges: List[Dict[str, Any]],
-        node_lookup: Dict[str, Dict[str, Any]],
-    ) -> str:
-        """Compact relationship listing."""
-        if not edges:
-            return ""
-        lines = ["[Relationships]"]
-        seen: Set[Tuple[str, str, str]] = set()
-        for edge in edges:
-            src = edge.get("source", "")
-            tgt = edge.get("target", "")
-            rel = edge.get("type", "RELATED_TO")
-            if src not in node_lookup or tgt not in node_lookup:
-                continue
-            key = (src, rel, tgt)
-            if key in seen:
-                continue
-            seen.add(key)
-            src_label = node_lookup[src].get("label", "?")
-            tgt_label = node_lookup[tgt].get("label", "?")
-            lines.append(
-                f"- {src_label}|{self._display_id(src)} "
-                f"-[{rel}]→ "
-                f"{tgt_label}|{self._display_id(tgt)}"
-            )
-            if len(lines) > 20:
-                lines.append("- ... (truncated)")
-                break
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    def _format_analytics_top_tools(self, payload: Dict[str, Any]) -> str:
+        """Formats the result of a global macro-query for most used tools."""
 
-    @staticmethod
-    def _merge_graph_data(
-        subgraph: Dict[str, Any],
-        expanded_nodes: Dict[str, Dict[str, Any]] | None,
-        expanded_edges: List[Dict[str, Any]] | None,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Merge subgraph + expansion data, deduplicating by node id."""
-        node_map: Dict[str, Dict[str, Any]] = {}
-        for n in subgraph.get("nodes", []):
-            node_map[n["id"]] = n
-        if expanded_nodes:
-            for nid, ndata in expanded_nodes.items():
-                if nid not in node_map:
-                    node_map[nid] = ndata
+        results = payload.get("results", [])
+        if not results:
+            return "[GLOBAL ANALYTICS] No tool usage data found."
+            
+        lines = ["[GLOBAL ANALYTICS] Most Widely Used Tools Across All Workflows\n"]
+        for i, row in enumerate(results, 1):
+            tool = row.get("tool_properties", {})
+            count = row.get("usage_count", 0)
+            name = tool.get("name", "Unknown Tool")
+            ver = tool.get("version", "")
+            ver_str = f" (v{ver})" if ver else ""
+            lines.append(f"{i}. {name}{ver_str}: Used in {count} steps")
+            if text := self._get_summary(tool):
+                lines.append(f"   - {text}")
+                
+        return "\n".join(lines)
+        
+    def _format_analytics_communities(self, payload: Dict[str, Any]) -> str:
+        """Formats tools grouped by Graph Data Science (GDS) communities."""
 
-        edge_set: Set[Tuple[str, str, str]] = set()
-        edges: List[Dict[str, Any]] = []
-        for e in subgraph.get("edges", []):
-            key = (e["source"], e["target"], e.get("type", ""))
-            if key not in edge_set:
-                edge_set.add(key)
-                edges.append(e)
-        if expanded_edges:
-            for e in expanded_edges:
-                key = (e["source"], e["target"], e.get("type", ""))
-                if key not in edge_set:
-                    edge_set.add(key)
-                    edges.append(e)
+        communities = payload.get("communities", {})
+        if not communities:
+            return "[GLOBAL ANALYTICS] No GDS community data found."
+            
+        lines = ["[GLOBAL ANALYTICS] Tool Ecosystem Communities & PageRank\n"]
+        
+        # Sort communities by total usage of tools inside them for display
+        sorted_comms = sorted(
+            communities.items(), 
+            key=lambda x: sum(t.get("usage_count", 0) for t in x[1]),
+            reverse=True
+        )
+        
+        for comm_id, tools in sorted_comms:
+            lines.append(f"Community ID [{comm_id}]: {len(tools)} Core Tools")
+            for t_data in tools:
+                tool = t_data.get("tool", {})
+                name = tool.get("name", "Unknown")
+                pr = t_data.get("pagerank", 0)
+                usage = t_data.get("usage_count", 0)
+                
+                metrics = []
+                if pr > 0:
+                    metrics.append(f"PageRank: {pr:.4f}")
+                metrics.append(f"Plays: {usage}")
+                
+                lines.append(f"  - {name} ({', '.join(metrics)})")
+            lines.append("") # spacer
+            
+        return "\n".join(lines)
 
-        return list(node_map.values()), edges
+    def _format_workflow_comparison(self, payload: Dict[str, Any]) -> str:
+        """Formats comparison between two workflows."""
 
-    @staticmethod
-    def _group_by_label(
-        nodes: List[Dict[str, Any]],
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        for node in nodes:
-            groups[node.get("label", "Unknown")].append(node)
-        return dict(groups)
+        wf_a = payload.get("workflow_a", {})
+        wf_b = payload.get("workflow_b", {})
+        shared = payload.get("shared_tools", [])
+        unique_a = payload.get("unique_to_a", [])
+        unique_b = payload.get("unique_to_b", [])
+        
+        name_a = self._get_entity_name(wf_a)
+        name_b = self._get_entity_name(wf_b)
+        
+        lines = [f"[WORKFLOW COMPARISON] {name_a} vs {name_b}\n"]
+        
+        if shared:
+            lines.append(f"Shared Tools ({len(shared)}):")
+            for t in shared:
+                lines.append(f"  - {self._get_entity_name(t)}")
+        else:
+            lines.append("No shared tools found.")
+            
+        if unique_a:
+            lines.append(f"\nUnique to {name_a} ({len(unique_a)}):")
+            for t in unique_a:
+                lines.append(f"  - {self._get_entity_name(t)}")
+                
+        if unique_b:
+            lines.append(f"\nUnique to {name_b} ({len(unique_b)}):")
+            for t in unique_b:
+                lines.append(f"  - {self._get_entity_name(t)}")
+                
+        return "\n".join(lines)
 
-    @staticmethod
-    def _order_steps(
-        steps: List[Dict[str, Any]],
-        edges: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Topologically order step nodes using NEXT_STEP edges."""
-        step_ids = {s["id"] for s in steps}
-        id_to_step = {s["id"]: s for s in steps}
+    def _format_tool_connection(self, payload: Dict[str, Any]) -> str:
+        """Formats the relationship path between two tools."""
 
-        # Build adjacency from NEXT_STEP edges
-        successors: Dict[str, str] = {}
-        has_predecessor: Set[str] = set()
-        for edge in edges:
-            if edge.get("type") != "NEXT_STEP":
+        tool_a = payload.get("tool_a", {})
+        tool_b = payload.get("tool_b", {})
+        shared_wfs = payload.get("shared_workflows", [])
+        data_flows = payload.get("data_flows", [])
+        
+        name_a = self._get_entity_name(tool_a)
+        name_b = self._get_entity_name(tool_b)
+        
+        lines = [f"[TOOL CONNECTION] {name_a} ↔ {name_b}\n"]
+        
+        if shared_wfs:
+            lines.append(f"Appear Together in {len(shared_wfs)} Workflow(s):")
+            for wf in shared_wfs:
+                lines.append(f"  - {self._get_entity_name(wf)}")
+        else:
+            lines.append("These tools do not appear in any shared workflow.")
+            
+        # Show data flow connections
+        valid_flows = [f for f in data_flows if f.get("output") or f.get("input")]
+        if valid_flows:
+            lines.append(f"\nPotential Data Flow Connections:")
+            for flow in valid_flows[:5]:
+                out = flow.get("output", {})
+                inp = flow.get("input", {})
+                if out and inp:
+                    lines.append(f"  {name_a} Output: {out.get('name', '?')} → {name_b} Input: {inp.get('name', '?')}")
+                    
+        return "\n".join(lines)
+
+    def _format_category_drilldown(self, payload: Dict[str, Any]) -> str:
+        """Formats a category with its ranked tools."""
+
+        category = payload.get("category", {})
+        tools = payload.get("tools", [])
+        
+        cat_name = category.get("name", "Unknown Category")
+        lines = [f"[CATEGORY] {cat_name}\n"]
+        
+        if not tools:
+            lines.append("No tools found in this category.")
+            return "\n".join(lines)
+            
+        lines.append(f"Top Tools (ranked by usage):")
+        for i, t_data in enumerate(tools, 1):
+            tool = t_data.get("tool") or {}
+            name = tool.get("name")
+            if not name:
                 continue
-            src, tgt = edge["source"], edge["target"]
-            if src in step_ids and tgt in step_ids:
-                successors[src] = tgt
-                has_predecessor.add(tgt)
+            usage = t_data.get("usage_count", 0)
+            examples = t_data.get("example_workflows", [])
+            
+            lines.append(f"{i}. {name}: {usage} uses")
+            if summary := self._get_summary(tool):
+                lines.append(f"   - {summary}")
+            if examples:
+                valid_examples = [str(e) for e in examples if e]
+                if valid_examples:
+                    lines.append(f"   - Example Workflows: {', '.join(valid_examples[:3])}")
+                
+        return "\n".join(lines)
 
-        # Find roots (steps without predecessor in chain)
-        roots = [sid for sid in step_ids if sid not in has_predecessor]
-        roots.sort()
+    # Utilities
+    @staticmethod
+    def _get_entity_name(props: Dict[str, Any]) -> str:
+        """Resolve a display name from entity properties, falling back through common fields."""
+        if not props:
+            return "Unknown"
+        for key in ("name", "file_name", "workflow_id", "tool_id", "step_uid"):
+            val = props.get(key)
+            if val and str(val).strip():
+                return str(val).strip()
+        return "Unknown"
 
-        ordered: List[Dict[str, Any]] = []
-        visited: Set[str] = set()
-
-        for root in roots:
-            current = root
-            while current and current not in visited:
-                visited.add(current)
-                if current in id_to_step:
-                    ordered.append(id_to_step[current])
-                current = successors.get(current)
-
-        # Append any steps not reachable from roots
-        for step in steps:
-            if step["id"] not in visited:
-                ordered.append(step)
-
-        return ordered
-
-    def _summary(self, properties: Dict[str, Any]) -> str:
+    def _get_summary(self, properties: Dict[str, Any]) -> str:
         for key in SUMMARY_FIELDS:
             value = properties.get(key)
             if value is None:
@@ -306,11 +355,7 @@ class ContextBuilder:
             value_string = " ".join(str(value).split())
             if value_string:
                 return self._format_value(value_string, 140)
-        return "No summary available."
-
-    @staticmethod
-    def _display_id(node_id: str) -> str:
-        return node_id.split(":", 1)[1] if ":" in node_id else node_id
+        return ""
 
     @staticmethod
     def _format_value(value: Any, max_len: int) -> str:
