@@ -99,25 +99,42 @@ async def get_galaxy_information_tool(
     query: str,
     query_type: str,
     entity_id: str = None
-) -> DefaultTextResponses:
+) -> InformerResponse:
     """
-    Fetch detailed information on Galaxy tools, workflows, datasets, and invocations.
+    Fetch detailed information about Galaxy tools, workflows, datasets, and workflow invocations.
 
-    This tool handles all information requests about Galaxy entities, based on
-    the `query_type` (tool, workflow, dataset) and the user's `query`.
-    Use `entity_id` only when the user's query explicitly includes an ID.
+    This tool performs semantic and fuzzy search over Galaxy entities and can access
+    information from the connected Galaxy instance (user-specific, real-time state) 
+    as well as global Galaxy data. It is intended for retrieving factual metadata 
+    about specific entities and interacting with the user's Galaxy environment.
+
+    Use this tool when:
+    - The user asks for a recommendation of a tool/workflow.
+    - The user asks for details about a specific tool, workflow, or dataset.
+    - The query involves workflow invocations or dataset metadata.
+    - The user may want to execute or import a workflow/tool.
+    - Real-time or instance-specific information is required.
+
+    Do NOT use this tool when:
+    - The query focuses on relationships between multiple tools or workflows.
+    - The question requires structural reasoning or ecosystem-level analysis.
+
+    Capabilities:
+    - Semantic and fuzzy search over Galaxy tools, workflows, and datasets.
+    - Retrieves metadata: descriptions, parameters, dataset info, workflow structure.
+    - Returns actionable links when available (e.g., execute workflow, import workflow, open tool).
 
     Args:
-        query: The user's query message that needs a response, accompanied by full and detailed contextual information.
-        query_type: The type of Galaxy entity the query needs a response for, with one of three values: "tool", "dataset", or "workflow".
-                    Select "workflow" for general workflow details and specific workflow invocation details.
-        entity_id: Optional parameter. Provide this only when the user's query explicitly includes an ID,
-                   allowing retrieval of information by that specific entity ID.
+        query (str): The user's natural language query with full context.
+        query_type (str): Galaxy entity type ("tool", "dataset", or "workflow").
+        entity_id (Optional[str]): Explicit Galaxy entity ID if provided.
 
     Returns:
-       DefaultTextResponses: A string containing the detailed Galaxy information and the response to the user's query. and a dict with action links of the information fetched.
-        
+        InformerResponse containing:
+            - response: Detailed textual answer.
+            - actions: Optional actionable operations (Execute or Import) with links.
     """
+    
     logger.info(f"Calling get_galaxy_information with query='{query}', query_type='{query_type}', entity_id='{entity_id}'")
     try:
         # Get current user
@@ -136,15 +153,15 @@ async def get_galaxy_information_tool(
     
     except GalaxyConnectionError as e:
         logger.error(f"Failed to connect to Galaxy: {e}")
-        return DefaultTextResponses(response=f"Failed to connect to Galaxy: {e}")
+        return InformerResponse(response="Failed to connect to Galaxy.", actions=None)
     except Exception as e:
         logger.error(f"Error in get_galaxy_information_tool: {e}", exc_info=True)
-        return DefaultTextResponses(response=f"An error occurred while fetching Galaxy information: {e}")
+        return InformerResponse(response="An error occurred while fetching Galaxy information.", actions=None)
 
 
-# ========================================================================================= #
-    ## Tool 2: GraphRAG knowledge retrieval, returns context from the Galaxy knowledge graph ##
-# ========================================================================================= #
+# ==================================================================================================================================================================== #
+    ## Tool 2: GraphRAG knowledge retrieval, returns context from the Galaxy knowledge graph, this it to handle structural, complex and multi hop reasoning queries ##
+# ==================================================================================================================================================================== #
 
 @bioblend_app.tool()
 async def graph_rag_query(
@@ -157,30 +174,37 @@ async def graph_rag_query(
     category: str = None,
 ) -> DefaultTextResponses:
     """
-    Retrieves context from the Galaxy knowledge graph using GraphRAG.
+    Retrieve contextual knowledge from the Galaxy knowledge graph using GraphRAG.
 
-    Performs semantic search over tools and workflows, expands results through
-    targeted Cypher queries on the Neo4j knowledge graph, and returns a
-    structured context string that can be used to answer the user's query.
+    This tool performs semantic retrieval combined with graph traversal over a
+    Neo4j knowledge graph of Galaxy tools and workflows. It is designed for
+    structural, complex and relationship-based queries that require reasoning over
+    connections between tools, workflows, or categories.
 
-    Supports three query modes:
-    - "local":   Standard semantic search + graph expansion for specific entities.
-    - "global":  Ecosystem-wide analytics (most used tools, community clusters).
-    - "complex": Multi-hop relationship queries (workflow comparisons, tool connections, category drill-downs).
+    Capabilities:
+    - Semantic search followed by graph expansion.
+    - Multi-hop reasoning over tool and workflow relationships.
+    - Workflow structure and tool connectivity analysis.
+    - Ecosystem-level insights from the knowledge graph.
+
+    Retrieval Modes:
+    - "local": Semantic search with graph expansion around relevant entities.
+    - "global": Ecosystem-level analysis (e.g., common tools, clusters).
+    - "complex": Multi-hop queries such as workflow comparisons or tool connection paths.
 
     Args:
-        query: The user's natural language question about Galaxy tools, workflows, or pipelines.
-        query_type: One of "local", "global", or "complex". Use "complex" when the query
-                    involves comparing workflows, finding tool relationships, or drilling into categories.
-        compare_workflows_a: For workflow comparison queries, the name/keyword for the first workflow.
-        compare_workflows_b: For workflow comparison queries, the name/keyword for the second workflow.
-        connect_tools_a: For tool connection queries, the name of the first tool.
-        connect_tools_b: For tool connection queries, the name of the second tool.
-        category: For category drill-down queries, the category name to explore.
+        query (str): The user's natural language question with full context.
+        query_type (Literal["local", "global", "complex"]): Retrieval mode.
+        compare_workflows_a (Optional[str]): First workflow for comparison queries.
+        compare_workflows_b (Optional[str]): Second workflow for comparison queries.
+        connect_tools_a (Optional[str]): First tool for connection/path queries.
+        connect_tools_b (Optional[str]): Second tool for connection/path queries.
+        category (Optional[str]): Category name for graph exploration.
 
     Returns:
-        DefaultTextResponses: The retrieved knowledge graph context as structured text.
+        DefaultTextResponses structured knowledge graph response.
     """
+    
     logger.info(f"GraphRAG query: '{query}', type='{query_type}'")
     try:
         
@@ -241,7 +265,7 @@ async def graph_rag_query(
             category=category,
         )
 
-        context = result.get("context", "No context found.")
+        context = result.get("context", "No context found.") # TODO: have an LLM interprated response instead of just passing the response.
         connector.close()
 
         return DefaultTextResponses(response=context)
@@ -261,21 +285,22 @@ async def explain_galaxy_workflow_invocation(
     failure: bool
 ) -> DefaultTextResponses:
     """
-    Generates a detailed explanation of a Galaxy workflow invocation.
+    Analyze a Galaxy workflow invocation and generate a detailed report.
 
-    This function retrieves and analyzes metadata for a given Galaxy workflow invocation.
-    It either summarizes successful outputs or provides diagnostic details for failed jobs,
-    and suggest fixes for workflow invocation.
+    This tool retrieves metadata for a specific Galaxy workflow invocation. 
+    It summarizes output datasets for successful jobs or provides diagnostic details 
+    and actionable suggestions for failed jobs.
+
+    Use this tool when:
+    - The user wants a summary of workflow outputs.
+    - The user needs diagnostics and suggested fixes for failed workflow runs.
 
     Args:
-        invocation_id (str): 
-            The unique identifier of the Galaxy workflow invocation to analyze.
-        failure (bool): 
-            Indicates whether to focus on failed job diagnostics (`True`) or 
-            output dataset summaries (`False`), if empty it defaults to false.
+        invocation_id (str): Unique identifier of the Galaxy workflow invocation to analyze.
+        failure (bool, optional): Focus on failed job diagnostics (`True`) or output summaries (`False`). Defaults to `False`.
 
     Returns:
-        DefaultTextResponses: A clear report of the workflow invocation results or a report explaining failure causes with actionable suggestions.
+        DefaultTextResponses: A detailed report of workflow outputs or failure diagnostics with actionable suggestions.
     """
     
     # Get current user
@@ -344,14 +369,20 @@ async def import_workflow_to_galaxy_instance(
     # TODO: No Galaxy duplicate check add that.
     
     """
-    Imports a Galaxy workflow from the IWC workflow repository or the WorkflowHUB repository, fetching the workflow JSON,
-    and uploading it to the Galaxy instance. Handles tool installation and ensures the workflow is added to the user's list.
+    Import a Galaxy workflow from the IWC or WorkflowHUB repository into the user's Galaxy instance.
+
+    This tool fetches the workflow JSON, uploads it to the connected Galaxy instance,
+    and ensures any required tools are installed. The workflow is then added to the
+    user's workflow list.
+
+    Use this tool when:
+    - The user wants to import an workflow.
 
     Args:
-        workflow_name (str): The Full and exact name of the workflow to import.
+        workflow_name (str): Full and exact name of the workflow to import.
 
     Returns:
-        DefaultTextResponses: A message indicating the import status or an error description.
+        DefaultTextResponses: Message indicating the import status or an error description.
     """
     try:
         
