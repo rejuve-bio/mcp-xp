@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
-from app.bioblend_server.GraphRAG.config import GraphRAGConfig
+from app.bioblend_server.GraphRAG.config import GraphRAGConfig, GraphRAGEnum
 
 SUMMARY_FIELDS = ["readme_content", "description", "help", "annotation", "name"]
 
@@ -102,7 +102,7 @@ class ContextBuilder:
             props = step_dict.get("properties", {})
             lines.append(f"    Step {i}: {props.get('name', 'Unnamed Step')}")
             if annotation := props.get("annotation"):
-                lines.append(f"      Annotation: {self._format_value(annotation, 100)}")
+                lines.append(f"      Annotation: {self._format_value(annotation)}")
             
             # Tools 
             for tool in step_dict.get("tools", []):
@@ -112,12 +112,12 @@ class ContextBuilder:
             # Input Needs
             for inp in step_dict.get("inputs", []):
                 if inp_name := inp.get('name'):
-                    lines.append(f"      - Requires Input: {inp_name} - {self._format_value(inp.get('description', ''), 60)}")
+                    lines.append(f"      - Requires Input: {inp_name} - {self._format_value(inp.get('description', ''))}")
                 
             # Generated Artifacts
             for out in step_dict.get("outputs", []):
                 if out_name := out.get('name'):
-                    lines.append(f"      - Generates Output: {out_name} - {self._format_value(out.get('description', ''), 60)}")
+                    lines.append(f"      - Generates Output: {out_name} - {self._format_value(out.get('description', ''))}")
 
         return "\n".join(lines)
 
@@ -173,13 +173,13 @@ class ContextBuilder:
             lines.append("\n  - Required Workflow Inputs:")
             for inp in inputs:
                 if inp_name := inp.get('name'):
-                    lines.append(f"    - {inp_name} - {self._format_value(inp.get('description', ''), 60)}")
+                    lines.append(f"    - {inp_name} - {self._format_value(inp.get('description', ''))}")
                 
         if outputs:
             lines.append("\n  - Generated Workflow Outputs:")
             for out in outputs:
                 if out_name := out.get('name'):
-                    val = self._format_value(out.get('description', ''), 60)
+                    val = self._format_value(out.get('description', ''))
                     lines.append(f"    - {out_name}" + (f" - {val}" if val else ""))
 
         return "\n".join(lines)
@@ -354,11 +354,13 @@ class ContextBuilder:
                 continue
             value_string = " ".join(str(value).split())
             if value_string:
-                return self._format_value(value_string, 140)
+                return self._format_value(value_string)
         return ""
 
     @staticmethod
-    def _format_value(value: Any, max_len: int) -> str:
+    def _format_value(value: Any) -> str:
+        
+        max_len = GraphRAGEnum.FORMAT_SIZE.value
         text = " ".join(str(value).split())
         if len(text) <= max_len:
             return text
