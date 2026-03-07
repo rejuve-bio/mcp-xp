@@ -1,4 +1,4 @@
-"""GraphRAG – Graph-augmented Retrieval for Galaxy knowledge graphs.
+"""Galaxy GraphRAG: Graph-augmented Retrieval for Galaxy knowledge graphs.
 
 Public API
 ----------
