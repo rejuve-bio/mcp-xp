@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any, Dict, List
 
-from app.bioblend_server.GraphRAG.config import GraphRAGConfig
+from app.bioblend_server.GraphRAG.config import GraphRAGConfig, GraphRAGEnum
 from app.bioblend_server.GraphRAG.context_builder import ContextBuilder
 from app.bioblend_server.GraphRAG.graph_retriever import GraphRetriever
 
@@ -89,8 +89,8 @@ class GraphRAGPipeline:
         if is_global:
             self.logger.info("Executing GLOBAL analytics query route.")
             context_payloads = [
-                self.graph_connector.get_most_used_tools(limit=10),
-                self.graph_connector.get_tools_by_community(limit=5)
+                self.graph_connector.get_most_used_tools(limit=GraphRAGEnum.MOST_USED_TOOL.value),
+                self.graph_connector.get_tools_by_community(limit=GraphRAGEnum.TOOl_IN_COMMUNITY.value)
             ]
             seed_nodes = []
             semantic_hits = []

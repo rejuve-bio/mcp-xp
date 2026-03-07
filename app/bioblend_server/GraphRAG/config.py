@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dotenv import load_dotenv
+from enum import IntEnum
 from dataclasses import dataclass, fields
 from typing import Any, Dict, List
 
@@ -44,3 +45,9 @@ class GraphRAGConfig:
         allowed_keys = {field_info.name for field_info in fields(cls)}
         filtered = {key: value for key, value in overrides.items() if key in allowed_keys}
         return cls(**filtered)
+
+
+class GraphRAGEnum(IntEnum):
+    FORMAT_SIZE = 300
+    MOST_USED_TOOL = 10
+    TOOl_IN_COMMUNITY = 10
