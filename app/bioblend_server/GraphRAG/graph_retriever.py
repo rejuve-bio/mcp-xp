@@ -10,7 +10,7 @@ from typing import (
 )
 
 from app.bioblend_server.GraphRAG.config import GraphRAGConfig
-
+from app.bioblend_server.GraphRAG.neo4j_connector import Neo4jGraphConnector
 
 PROPERTY_MAPPING_ORDER: List[Tuple[str, str]] = [
     ("Workflow", "workflow_id"),
@@ -74,10 +74,10 @@ class GraphRetriever:
         semantic_adapter: Any,
         config: GraphRAGConfig,
     ) -> None:
-        self.graph_connector = graph_connector
+        self.graph_connector: Neo4jGraphConnector = graph_connector
         self.semantic_adapter = semantic_adapter
         self.config = config
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.log = logging.getLogger(self.__class__.__name__)
 
     async def retrieve(
         self,
@@ -97,6 +97,7 @@ class GraphRetriever:
             A payload dict containing ``semantic_hits``, ``seed_nodes``,
             ``semantic_scores``, and ``context_payloads``.
         """
+        self.log.info(f"Starting retrieval for query: '{query}' with top_k: {top_k}")
         # 1. Semantic retrieval via adapter
         semantic_hits = await self._safe_semantic_search(
             query=query,
@@ -109,6 +110,7 @@ class GraphRetriever:
             semantic_hits, query
         )
         if not seed_nodes:
+            self.log.debug(f"No seed nodes from semantic hits, falling back for query: '{query}'")
             seed_nodes = self._fallback_query_seeds(query)[:top_k]
 
         seed_nodes = seed_nodes[:top_k]
@@ -117,28 +119,34 @@ class GraphRetriever:
         context_payloads: List[Dict[str, Any]] = []
         
         for seed in seed_nodes:
-            label = seed.get("label")
-            internal_id_raw = seed.get("internal_id")
-            if internal_id_raw is None or internal_id_raw == "":
-                self.logger.warning(f"Seed {seed['id']} missing internal_id. Skipping context fetch.")
+            try:
+                self.log.debug(f"Processing seed: {seed}")
+                label = seed.get("label")
+                internal_id_raw = seed.get("internal_id")
+                if internal_id_raw is None or internal_id_raw == "":
+                    self.log.warning(f"Seed {seed['id']} missing internal_id. Skipping context fetch.")
+                    continue
+                    
+                internal_id = int(str(internal_id_raw))
+                payload = {}
+                
+                if label == "Workflow":
+                    payload = self.graph_connector.get_workflow_context(internal_id)
+                elif label == "Tool":
+                    payload = self.graph_connector.get_tool_context(internal_id)
+                elif label == "Step":
+                    payload = self.graph_connector.get_step_context(internal_id)
+                else:
+                    self.log.debug(f"Label {label} does not have a dedicated fetcher yet.")
+                    
+                if payload:
+                    payload["_source_seed"] = seed
+                    context_payloads.append(payload)
+            except Exception as error:
+                self.log.error(f"Error processing seed {seed}: {error}", exc_info=True)
                 continue
-                
-            internal_id = int(str(internal_id_raw))
-            payload = {}
-            
-            if label == "Workflow":
-                payload = self.graph_connector.get_workflow_context(internal_id)
-            elif label == "Tool":
-                payload = self.graph_connector.get_tool_context(internal_id)
-            elif label == "Step":
-                payload = self.graph_connector.get_step_context(internal_id)
-            else:
-                self.logger.debug(f"Label {label} does not have a dedicated fetcher yet.")
-                
-            if payload:
-                payload["_source_seed"] = seed
-                context_payloads.append(payload)
 
+        self.log.info(f"Retrieval completed with {len(context_payloads)} context payloads")
         return {
             "semantic_hits": semantic_hits,
             "seed_nodes": seed_nodes,
@@ -153,37 +161,49 @@ class GraphRetriever:
         query: str,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
         """ Map semantic hits to seed nodes. """
+        try:
+            self.log.info(f"Mapping {len(semantic_hits)} semantic hits to seed nodes for query: '{query}'")
 
-        seed_map: Dict[str, Dict[str, Any]] = {}
-        semantic_scores: Dict[str, float] = {}
+            seed_map: Dict[str, Dict[str, Any]] = {}
+            semantic_scores: Dict[str, float] = {}
 
-        for rank, hit in enumerate(semantic_hits):
-            hit_score = self._semantic_hit_score(hit, rank)
-            lookup_values = self._extract_lookup_values(hit)
-            matched_nodes = self._lookup_nodes(lookup_values)
+            for rank, hit in enumerate(semantic_hits):
+                try:
+                    self.log.debug(f"Processing semantic hit rank {rank}: {hit}")
+                    hit_score = self._semantic_hit_score(hit, rank)
+                    lookup_values = self._extract_lookup_values(hit)
+                    matched_nodes = self._lookup_nodes(lookup_values)
 
-            if not matched_nodes:
-                text_value = hit.get("text")
-                if isinstance(text_value, str) and text_value.strip():
-                    matched_nodes = self._lookup_nodes([text_value], fuzzy_only=True)
+                    if not matched_nodes:
+                        text_value = hit.get("text")
+                        if isinstance(text_value, str) and text_value.strip():
+                            matched_nodes = self._lookup_nodes([text_value], fuzzy_only=True)
 
-            for node in matched_nodes:
-                node_id = node["id"]
-                if node_id not in seed_map:
-                    seed_map[node_id] = node
-                semantic_scores[node_id] = max(
-                    semantic_scores.get(node_id, 0.0), hit_score
-                )
+                    for node in matched_nodes:
+                        node_id = node["id"]
+                        if node_id not in seed_map:
+                            seed_map[node_id] = node
+                        semantic_scores[node_id] = max(
+                            semantic_scores.get(node_id, 0.0), hit_score
+                        )
+                except Exception as error:
+                    self.log.error(f"Error processing semantic hit rank {rank}: {error}", exc_info=True)
+                    continue
 
-        if not seed_map and query.strip():
-            for node in self._fallback_query_seeds(query):
-                seed_map[node["id"]] = node
+            if not seed_map and query.strip():
+                self.log.debug(f"No seeds from hits, using fallback for query: '{query}'")
+                for node in self._fallback_query_seeds(query):
+                    seed_map[node["id"]] = node
 
-        ordered_nodes = sorted(
-            seed_map.values(),
-            key=lambda node: (-semantic_scores.get(node["id"], 0.0), node["id"]),
-        )
-        return ordered_nodes, semantic_scores
+            ordered_nodes = sorted(
+                seed_map.values(),
+                key=lambda node: (-semantic_scores.get(node["id"], 0.0), node["id"]),
+            )
+            self.log.info(f"Mapped to {len(ordered_nodes)} ordered seed nodes")
+            return ordered_nodes, semantic_scores
+        except Exception as error:
+            self.log.error(f"Error in map_semantic_hits_to_seed_nodes: {error}", exc_info=True)
+            return [], {}
 
     def _lookup_nodes(
         self,
@@ -191,87 +211,124 @@ class GraphRetriever:
         fuzzy_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """ Lookup nodes in the graph based on a list of lookup values. """
+        try:
+            self.log.info(f"Looking up nodes with values: {list(lookup_values)}, fuzzy_only: {fuzzy_only}")
 
-        found: Dict[str, Dict[str, Any]] = {}
-        seen_values: set[str] = set()
-        values_to_try: List[str] = []
+            found: Dict[str, Dict[str, Any]] = {}
+            seen_values: set[str] = set()
+            values_to_try: List[str] = []
 
-        for raw_value in lookup_values:
-            value = str(raw_value).strip()
-            if not value or value in seen_values:
-                continue
-            seen_values.add(value)
-            values_to_try.append(value)
+            for raw_value in lookup_values:
+                try:
+                    value = str(raw_value).strip()
+                    if not value or value in seen_values:
+                        continue
+                    seen_values.add(value)
+                    values_to_try.append(value)
+                    
+                    if ":" in value:
+                        part = value.split(":", 1)[1]
+                        if part not in seen_values:
+                            seen_values.add(part)
+                            values_to_try.append(part)
+                except Exception as error:
+                    self.log.error(f"Error processing lookup value {raw_value}: {error}", exc_info=True)
+                    continue
+
+            if not values_to_try:
+                self.log.debug("No values to try for lookup")
+                return []
+
+            exact_props_by_label: Dict[str, set[str]] = {}
+            fuzzy_props_by_label: Dict[str, set[str]] = {}
+
+            if not fuzzy_only:
+                for label, prop in PROPERTY_MAPPING_ORDER:
+                    exact_props_by_label.setdefault(label, set()).add(prop)
+
+            for label, prop in FUZZY_MAPPING_FIELDS:
+                fuzzy_props_by_label.setdefault(label, set()).add(prop)
+
+            labels = set(exact_props_by_label.keys()) | set(fuzzy_props_by_label.keys())
             
-            if ":" in value:
-                part = value.split(":", 1)[1]
-                if part not in seen_values:
-                    seen_values.add(part)
-                    values_to_try.append(part)
+            for label in labels:
+                try:
+                    self.log.debug(f"Processing label: {label}")
+                    exact_props = list(exact_props_by_label.get(label, []))
+                    fuzzy_props = list(fuzzy_props_by_label.get(label, []))
+                    
+                    nodes = self.graph_connector.find_nodes_by_values(
+                        label=label,
+                        exact_props=exact_props,
+                        fuzzy_props=fuzzy_props,
+                        values=values_to_try
+                    )
+                    for node in nodes:
+                        found[node["id"]] = node
+                except Exception as error:
+                    self.log.error(f"Error looking up nodes for label {label}: {error}", exc_info=True)
+                    continue
 
-        if not values_to_try:
+            self.log.info(f"Found {len(found)} nodes")
+            return list(found.values())
+        except Exception as error:
+            self.log.error(f"Error in _lookup_nodes: {error}", exc_info=True)
             return []
-
-        exact_props_by_label: Dict[str, set[str]] = {}
-        fuzzy_props_by_label: Dict[str, set[str]] = {}
-
-        if not fuzzy_only:
-            for label, prop in PROPERTY_MAPPING_ORDER:
-                exact_props_by_label.setdefault(label, set()).add(prop)
-
-        for label, prop in FUZZY_MAPPING_FIELDS:
-            fuzzy_props_by_label.setdefault(label, set()).add(prop)
-
-        labels = set(exact_props_by_label.keys()) | set(fuzzy_props_by_label.keys())
-        
-        for label in labels:
-            exact_props = list(exact_props_by_label.get(label, []))
-            fuzzy_props = list(fuzzy_props_by_label.get(label, []))
-            
-            nodes = self.graph_connector.find_nodes_by_values(
-                label=label,
-                exact_props=exact_props,
-                fuzzy_props=fuzzy_props,
-                values=values_to_try
-            )
-            for node in nodes:
-                found[node["id"]] = node
-
-        return list(found.values())
 
     def _fallback_query_seeds(self, query: str) -> List[Dict[str, Any]]:
         
-        if not query.strip():
+        try:
+            self.log.info(f"Fallback query seeds for: '{query}'")
+            if not query.strip():
+                self.log.debug("Empty query, returning empty list")
+                return []
+            return self._lookup_nodes([query], fuzzy_only=True)
+        except Exception as error:
+            self.log.error(f"Error in _fallback_query_seeds: {error}", exc_info=True)
             return []
-        return self._lookup_nodes([query], fuzzy_only=True)
 
     def _extract_lookup_values(self, hit: Dict[str, Any]) -> List[str]:
 
-        values: List[str] = []
-        hit_id = hit.get("id")
-        if hit_id is not None:
-            values.append(str(hit_id))
+        try:
+            self.log.debug(f"Extracting lookup values from hit: {hit}")
+            values: List[str] = []
+            hit_id = hit.get("id")
+            if hit_id is not None:
+                values.append(str(hit_id))
 
-        meta = hit.get("meta", {})
-        if isinstance(meta, dict):
-            for key in SEMANTIC_META_KEYS:
-                if key in meta and meta[key] is not None:
-                    values.append(str(meta[key]))
-        return values
+            meta = hit.get("meta", {})
+            if isinstance(meta, dict):
+                for key in SEMANTIC_META_KEYS:
+                    if key in meta and meta[key] is not None:
+                        values.append(str(meta[key]))
+            self.log.debug(f"Extracted values: {values}")
+            return values
+        except Exception as error:
+            self.log.error(f"Error in _extract_lookup_values: {error}", exc_info=True)
+            return []
 
     def _semantic_hit_score(self, hit: Dict[str, Any], rank: int) -> float:
 
-        for key in ("score", "relevance", "similarity"):
-            score_value = hit.get(key)
-            if isinstance(score_value, (int, float)):
-                return float(score_value)
-        meta = hit.get("meta", {})
-        if isinstance(meta, dict):
+        try:
+            self.log.debug(f"Calculating semantic hit score for rank {rank}: {hit}")
             for key in ("score", "relevance", "similarity"):
-                score_value = meta.get(key)
+                score_value = hit.get(key)
                 if isinstance(score_value, (int, float)):
+                    self.log.debug(f"Found score {score_value} for key {key}")
                     return float(score_value)
-        return 1.0 / float(rank + 1)
+            meta = hit.get("meta", {})
+            if isinstance(meta, dict):
+                for key in ("score", "relevance", "similarity"):
+                    score_value = meta.get(key)
+                    if isinstance(score_value, (int, float)):
+                        self.log.debug(f"Found score {score_value} in meta for key {key}")
+                        return float(score_value)
+            default_score = 1.0 / float(rank + 1)
+            self.log.debug(f"Using default score: {default_score}")
+            return default_score
+        except Exception as error:
+            self.log.error(f"Error in _semantic_hit_score: {error}", exc_info=True)
+            return 0.0
 
     async def _safe_semantic_search(
         self,
@@ -281,11 +338,12 @@ class GraphRetriever:
     ) -> List[Dict[str, Any]]:
 
         try:
+            self.log.info(f"Performing safe semantic search for query: '{query}' with top_k: {top_k}")
             return await self.semantic_adapter.search(
                 query,
                 top_k=top_k,
                 entities_by_type=entities_by_type,
             )
         except Exception as error:
-            self.logger.warning("Semantic search failed: %s", error)
+            self.log.warning(f"Semantic search failed: {error}", exc_info=True)
             return []
