@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import os
+from dotenv import load_dotenv
 from dataclasses import dataclass, fields
 from typing import Any, Dict, List
 
+load_dotenv()
+
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "neo4j")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 # Mapping from node label to the primary ID field used for canonical IDs
 NODE_ID_FIELDS: Dict[str, List[str]] = {
@@ -15,7 +23,6 @@ NODE_ID_FIELDS: Dict[str, List[str]] = {
     "Output":     ["output_uid", "name"],
     "Category":   ["category_id", "name"],
 }
-
 
 # Pipeline Configuration
 

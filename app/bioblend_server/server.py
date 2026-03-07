@@ -3,7 +3,7 @@ import re
 import json
 from fastmcp import FastMCP
 import logging
-from typing import Optional
+from typing import Literal, Optional
 import asyncio
 import httpx
 from contextlib import asynccontextmanager
@@ -29,6 +29,17 @@ from app.bioblend_server.utils import (
 from app.bioblend_server.background_runner import BackgroundIndexer
 from app.bioblend_server.informer.informer import GalaxyInformer
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
+
+from app.bioblend_server.GraphRAG.config import(
+    NEO4J_URI,
+    NEO4J_USER,
+    NEO4J_PASSWORD,
+    NEO4J_DATABASE
+)
+
+from app.bioblend_server.GraphRAG.neo4j_connector import Neo4jGraphConnector
+from app.bioblend_server.GraphRAG.semantic_adapter import InformerSemanticAdapter
+from app.bioblend_server.GraphRAG.pipeline import GraphRAGPipeline
 
 configure_logging()
 logger = logging.getLogger("fastmcp_bioblend_server")
@@ -62,7 +73,7 @@ async def mcp_galaxy_lifespan(server: FastMCP):
     
     
 # ==================================== #
-     ## MCP Server ##
+     ## The Galaxy MCP Server ##
 # ==================================== #
 
 bioblend_app = FastMCP(
@@ -80,7 +91,7 @@ bioblend_app = FastMCP(
 
 
 # =============================================================================================================================================================== #
-    ## Tool 2: Galaxy assitant recommendation tool, gives details on galaxy datasets, tools, and workflows both in and outside of the connected galaxy instance ##
+    ## Tool 1: Galaxy assitant recommendation tool, gives details on galaxy datasets, tools, and workflows both in and outside of the connected galaxy instance ##
 # =============================================================================================================================================================== #
 
 @bioblend_app.tool()
@@ -129,10 +140,119 @@ async def get_galaxy_information_tool(
     except Exception as e:
         logger.error(f"Error in get_galaxy_information_tool: {e}", exc_info=True)
         return DefaultTextResponses(response=f"An error occurred while fetching Galaxy information: {e}")
+
+
+# ========================================================================================= #
+    ## Tool 2: GraphRAG knowledge retrieval, returns context from the Galaxy knowledge graph ##
+# ========================================================================================= #
+
+@bioblend_app.tool()
+async def graph_rag_query(
+    query: str,
+    query_type: Literal["local", "global", "complex"] = "local",
+    compare_workflows_a: str = None,
+    compare_workflows_b: str = None,
+    connect_tools_a: str = None,
+    connect_tools_b: str = None,
+    category: str = None,
+) -> DefaultTextResponses:
+    """
+    Retrieves context from the Galaxy knowledge graph using GraphRAG.
+
+    Performs semantic search over tools and workflows, expands results through
+    targeted Cypher queries on the Neo4j knowledge graph, and returns a
+    structured context string that can be used to answer the user's query.
+
+    Supports three query modes:
+    - "local":   Standard semantic search + graph expansion for specific entities.
+    - "global":  Ecosystem-wide analytics (most used tools, community clusters).
+    - "complex": Multi-hop relationship queries (workflow comparisons, tool connections, category drill-downs).
+
+    Args:
+        query: The user's natural language question about Galaxy tools, workflows, or pipelines.
+        query_type: One of "local", "global", or "complex". Use "complex" when the query
+                    involves comparing workflows, finding tool relationships, or drilling into categories.
+        compare_workflows_a: For workflow comparison queries, the name/keyword for the first workflow.
+        compare_workflows_b: For workflow comparison queries, the name/keyword for the second workflow.
+        connect_tools_a: For tool connection queries, the name of the first tool.
+        connect_tools_b: For tool connection queries, the name of the second tool.
+        category: For category drill-down queries, the category name to explore.
+
+    Returns:
+        DefaultTextResponses: The retrieved knowledge graph context as structured text.
+    """
+    logger.info(f"GraphRAG query: '{query}', type='{query_type}'")
+    try:
+        
+        from app.bioblend_server.informer.manager import InformerManager
+        from app.bioblend_server.informer.search.semantic_searcher import SemanticSearcher
+
+        # 1. Neo4j connector
+        connector = Neo4jGraphConnector(
+            uri=NEO4J_URI,
+            user=NEO4J_USER,
+            password=NEO4J_PASSWORD,
+            database=NEO4J_DATABASE,
+        )
+
+        # 2. Semantic adapter
+        manager = await InformerManager.create()
+
+        user_api_key = current_api_key_server.get()
+        galaxy_client = GalaxyClient(user_api_key) if user_api_key else None
+        username = galaxy_client.whoami if galaxy_client else "default_user"
+
+        semantic_searcher = SemanticSearcher(
+            vector_manager=manager,
+            entity_type="tool",
+            username=username,
+            score_threshold=0.3,
+            limit=10,
+        )
+
+        adapter = InformerSemanticAdapter(
+            semantic_searcher=semantic_searcher,
+            entity_types=["tool", "workflow"],
+        )
+
+        # 3. Pipeline
+        pipeline = GraphRAGPipeline(
+            graph_connector=connector,
+            semantic_adapter=adapter,
+            config={"log_level": "INFO"},
+        )
+
+        # 4. Build optional complex query params
+        compare_workflows = None
+        if compare_workflows_a and compare_workflows_b:
+            compare_workflows = (compare_workflows_a, compare_workflows_b)
+
+        connect_tools = None
+        if connect_tools_a and connect_tools_b:
+            connect_tools = (connect_tools_a, connect_tools_b)
+
+        # 5. Execute
+        result = await pipeline.retrieve_context(
+            query=query,
+            query_type=query_type,
+            top_k=15,
+            compare_workflows=compare_workflows,
+            connect_tools=connect_tools,
+            category=category,
+        )
+
+        context = result.get("context", "No context found.")
+        connector.close()
+
+        return DefaultTextResponses(response=context)
+
+    except Exception as e:
+        logger.error(f"GraphRAG query failed: {e}", exc_info=True)
+        return DefaultTextResponses(response=f"GraphRAG query failed: {str(e)}")
     
 
 # ========================================================================================================== #
-    ## Tool 2: Invocaiton Analyzing tool, analyzes, summarizes and recommends fixes for failed invocaiton. ##
+    ## Tool 3: Invocation Analyzing tool, analyzes, summarizes and recommends fixes for failed invocaiton. ##
 # ========================================================================================================== #
 
 @bioblend_app.tool()
@@ -214,7 +334,7 @@ async def explain_galaxy_workflow_invocation(
 
 
 # ============================================================ #
-    ## Tool 3: Workflow Importing tool after recommendation. ##
+    ## Tool 4: Workflow Importing tool after recommendation. ##
 # ============================================================ #
 
 @bioblend_app.tool()
@@ -224,7 +344,7 @@ async def import_workflow_to_galaxy_instance(
     # TODO: No Galaxy duplicate check add that.
     
     """
-    Imports a Galaxy workflow from the IWC workflow repository, fetching the workflow JSON,
+    Imports a Galaxy workflow from the IWC workflow repository or the WorkflowHUB repository, fetching the workflow JSON,
     and uploading it to the Galaxy instance. Handles tool installation and ensures the workflow is added to the user's list.
 
     Args:
