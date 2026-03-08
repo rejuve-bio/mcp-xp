@@ -80,7 +80,7 @@ packaging==25.0
 pandas==2.3.0
 pathable==0.4.4
 pathvalidate==3.3.1
-pillow==12.0.0
+pillow==12.1.1
 pip==24.0
 platformdirs==4.5.0
 pluggy==1.6.0
