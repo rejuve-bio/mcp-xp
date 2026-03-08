@@ -87,7 +87,7 @@ pluggy==1.6.0
 portalocker==2.10.1
 propcache==0.3.1
 proto-plus==1.26.1
-protobuf==5.29.5
+protobuf==5.29.6
 py-key-value-aio==0.2.8
 py-key-value-shared==0.2.8
 pyasn1==0.6.1
