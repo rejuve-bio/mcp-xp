@@ -29,7 +29,7 @@ email_validator==2.2.0
 exceptiongroup==1.2.2
 fastapi==0.115.12
 fastmcp==2.13.1
-filelock==3.20.0
+filelock==3.20.3
 frozenlist==1.5.0
 fsspec==2025.10.0
 google-ai-generativelanguage==0.6.15
