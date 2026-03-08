@@ -90,7 +90,7 @@ proto-plus==1.26.1
 protobuf==5.29.6
 py-key-value-aio==0.2.8
 py-key-value-shared==0.2.8
-pyasn1==0.6.1
+pyasn1==0.6.2
 pyasn1_modules==0.4.2
 pycparser==2.22
 pydantic==2.11.7
