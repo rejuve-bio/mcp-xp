@@ -21,6 +21,7 @@ dependencies = [
     "mcp>=1.28.1,<2.0.0",
     "google-genai==1.68.0",
     "httpx==0.28.1",
+    "neo4j==6.1.0",
     "numpy==2.2.6",
     "openai==1.75.0",
     "pandas==2.3.0",
