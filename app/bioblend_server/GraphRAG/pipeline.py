@@ -1,197 +1,243 @@
+"""End-to-end async GraphRAG pipeline.
+
+Orchestrates the full flow: query preprocessing → semantic search →
+entity resolution → LLM planning → Cypher execution → context rendering →
+answer synthesis.
+"""
+
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any
 
-from app.bioblend_server.GraphRAG.config import GraphRAGConfig, GraphRAGEnum
+from app.bioblend_server.GraphRAG.config import GraphRAGConfig
 from app.bioblend_server.GraphRAG.context_builder import ContextBuilder
-from app.bioblend_server.GraphRAG.graph_retriever import GraphRetriever
+from app.bioblend_server.GraphRAG.entity_resolver import EntityResolver
+from app.bioblend_server.GraphRAG.executor import QueryExecutor
+from app.bioblend_server.GraphRAG.models import ExecutionResult, PlannerValidationError
 from app.bioblend_server.GraphRAG.neo4j_connector import Neo4jGraphConnector
+from app.bioblend_server.GraphRAG.planner import GraphRAGPlanner
 from app.bioblend_server.GraphRAG.semantic_adapter import InformerSemanticAdapter
+from app.bioblend_server.utils import get_llm_response
+
+
+# ---------------------------------------------------------------------------
+# Answer synthesis prompt
+# ---------------------------------------------------------------------------
+
+_SYNTHESIS_PROMPT = """\
+You are a knowledgeable Galaxy bioinformatics assistant. Your task is to answer
+the user's question using ONLY the graph evidence provided below. Do not
+fabricate information that is not present in the evidence.
+
+## Instructions
+
+1. Read the user's question carefully.
+2. Read the graph evidence — it contains structured facts retrieved from a
+   Galaxy knowledge graph of bioinformatics tools, workflows, steps, and their
+   relationships.
+3. Synthesize a clear, accurate, and helpful answer grounded strictly in the
+   evidence.
+4. If the evidence is incomplete or does not fully answer the question,
+   acknowledge what is known and what is missing.
+5. Use specific names, versions, and relationships from the evidence.
+6. Structure your answer with clear sections or bullet points when appropriate.
+7. Keep the answer concise but thorough — prefer precision over length.
+
+## User Question
+
+{query}
+
+## Graph Evidence
+
+{evidence}
+
+## Known Limitations
+
+{limitations}
+
+## Your Answer
+"""
 
 
 class GraphRAGPipeline:
-    """End-to-end async GraphRAG pipeline using targeted Cypher contexts.
+    """Orchestrates the planner-driven GraphRAG pipeline.
 
     Stages:
-      1. Query intake & preprocessing
-      2. Semantic retrieval (Informer schema-aware wrapper)
-      3. Payload fetching (Targeted Cypher contexts)
-      4. Markdown Context assembly
-      5. Output packaging
-      
+        1. Query preprocessing
+        2. Semantic search (Qdrant via InformerSemanticAdapter)
+        3. Entity resolution (semantic hits → Neo4j nodes)
+        4. LLM planning (query + seeds → CypherQuerySchemas)
+        5. Cypher execution (schemas → parameterized queries → results)
+        6. Context rendering (results → Markdown evidence)
+        7. Answer synthesis (query + evidence → LLM-generated answer)
+        8. Output packaging
     """
 
     def __init__(
         self,
-        graph_connector: Neo4jGraphConnector,
+        connector: Neo4jGraphConnector,
         semantic_adapter: InformerSemanticAdapter,
-        config: Dict[str, Any] | None = None,
+        config: dict[str, Any] | GraphRAGConfig | None = None,
     ) -> None:
-        """
-        Args:
-            graph_connector: A ``Neo4jGraphConnector`` instance.
-            semantic_adapter: An ``InformerSemanticAdapter`` instance.
-            config: Optional dict of overrides for ``GraphRAGConfig``.
-        """
-        self.config = GraphRAGConfig.from_dict(config)
+        if isinstance(config, dict):
+            self.config = GraphRAGConfig.from_dict(config)
+        elif isinstance(config, GraphRAGConfig):
+            self.config = config
+        else:
+            self.config = GraphRAGConfig()
+
         self.log = logging.getLogger(self.__class__.__name__)
 
-        self.graph_connector = graph_connector
-        self.semantic_adapter = semantic_adapter
-
-        self.retriever = GraphRetriever(
-            graph_connector, semantic_adapter, self.config
-        )
+        self.connector = connector
+        self.adapter = semantic_adapter
+        self.resolver = EntityResolver(connector)
+        self.planner = GraphRAGPlanner(self.config)
+        self.executor = QueryExecutor(connector, self.config)
         self.context_builder = ContextBuilder(self.config)
 
-    # Public API
-
-    async def retrieve_context(
+    async def run(
         self,
         query: str,
-        query_type: str = "local",
-        top_k: int = 10,
-        entities_by_type: Dict[str, List[Dict[str, Any]]] | None = None,
-        compare_workflows: tuple[str, str] | None = None,
-        connect_tools: tuple[str, str] | None = None,
-        category: str | None = None,
-    ) -> Dict[str, Any]:
-        """Run the full Cypher-Native GraphRAG pipeline.
+        debug: bool = False,
+    ) -> ExecutionResult:
+        """Run the full GraphRAG pipeline.
 
         Args:
-            query: Raw user query.
-            query_type: "local" (semantic search), "global" (GDS analytics),
-                or "complex" (multi-hop relationship queries).
-            top_k: Number of top-ranked candidates to keep.
-            entities_by_type: Optional entity lists passed to the
-                semantic adapter.
-            compare_workflows: Tuple of (workflow_name_a, workflow_name_b)
-                for workflow comparison queries.
-            connect_tools: Tuple of (tool_name_a, tool_name_b) for
-                tool connection path queries.
-            category: Category name for category drill-down queries.
+            query: Natural-language user query.
+            debug: If True, include per-query timing in the result.
 
         Returns:
-            A dict containing ``context``, ``semantic_matches``, 
-            ``context_payloads``, and ``metadata``.
+            ``ExecutionResult`` with synthesized answer, raw evidence,
+            matched entities, plan summary, limitations, and optional debug trace.
         """
         try:
-            self.log.info(f"Starting retrieve_context for query: '{query}', type: {query_type}, top_k: {top_k}")
+            self.log.info(f"Pipeline starting for query: '{query}'")
 
-            # 1. Preprocess query
-            cleaned_query = self._preprocess_query(query)
-            self.log.info(f"Pipeline query: '{query}' → '{cleaned_query}'")
+            # 1. Preprocess
+            cleaned = _preprocess_query(query)
+            self.log.debug(f"Cleaned query: '{cleaned}'")
 
-            # 2. Dual-Mode Routing
-            is_global = query_type.lower() == "global"
-            
-            if is_global:
-                self.log.info("Executing GLOBAL analytics query route.")
-                context_payloads = [
-                    self.graph_connector.get_most_used_tools(limit=GraphRAGEnum.MOST_USED_TOOL.value),
-                    self.graph_connector.get_tools_by_community(limit=GraphRAGEnum.TOOl_IN_COMMUNITY.value)
-                ]
-                seed_nodes = []
-                semantic_hits = []
-            elif query_type.lower() == "complex":
-                self.log.info("Executing COMPLEX query route.")
-                # First, do the standard local semantic search for base context
-                retrieval_payload = await self.retriever.retrieve(
-                    query=cleaned_query,
-                    top_k=top_k,
-                    entities_by_type=entities_by_type,
-                )
-                context_payloads = list(retrieval_payload["context_payloads"])
-                seed_nodes = retrieval_payload["seed_nodes"]
-                semantic_hits = retrieval_payload["semantic_hits"]
-                
-                # Then, layer on the complex Cypher fetchers
-                if compare_workflows:
-                    try:
-                        payload = self.graph_connector.get_workflow_comparison(
-                            compare_workflows[0], compare_workflows[1]
-                        )
-                        if payload:
-                            context_payloads.append(payload)
-                    except Exception as error:
-                        self.log.error(f"Error in workflow comparison: {error}", exc_info=True)
-                        
-                if connect_tools:
-                    try:
-                        payload = self.graph_connector.get_tool_connection_path(
-                            connect_tools[0], connect_tools[1]
-                        )
-                        if payload:
-                            context_payloads.append(payload)
-                    except Exception as error:
-                        self.log.error(f"Error in tool connection: {error}", exc_info=True)
-                        
-                if category:
-                    try:
-                        payload = self.graph_connector.get_category_tools(category)
-                        if payload:
-                            context_payloads.append(payload)
-                    except Exception as error:
-                        self.log.error(f"Error in category tools: {error}", exc_info=True)
-            else:
-                self.log.info("Executing LOCAL semantic query route.")
-                retrieval_payload = await self.retriever.retrieve(
-                    query=cleaned_query,
-                    top_k=top_k,
-                    entities_by_type=entities_by_type,
-                )
-                context_payloads = retrieval_payload["context_payloads"]
-                seed_nodes = retrieval_payload["seed_nodes"]
-                semantic_hits = retrieval_payload["semantic_hits"]
+            # 2. Semantic search
+            self.log.info("Running semantic search")
+            semantic_hits = await self.adapter.search(
+                cleaned,
+                top_k=self.config.budget.semantic_top_k,
+            )
+            self.log.info(f"Semantic search returned {len(semantic_hits)} hits")
 
-            # 3. Context assembly (schema-aware payload formatting)
-            context = self.context_builder.build_context(
-                context_payloads=context_payloads,
+            # 3. Entity resolution
+            self.log.info("Resolving entities")
+            seeds = await self.resolver.resolve(
+                semantic_hits,
+                cleaned,
+                max_seeds=self.config.budget.max_seeds,
+            )
+            self.log.info(f"Resolved {len(seeds)} seed entities")
+
+            # 4. LLM planning
+            self.log.info("Running LLM planner")
+            planner_output = await self.planner.plan(cleaned, seeds)
+            self.log.info(
+                f"Planner generated {len(planner_output.query_schemas)} schemas"
             )
 
-            # 4. Output packaging
-            metadata = {
-                "query": query,
-                "cleaned_query": cleaned_query,
-                "query_type": query_type,
-                "seed_count": len(seed_nodes),
-                "semantic_hit_count": len(semantic_hits),
-                "context_payloads_fetched": len(context_payloads),
-                "context_chars": len(context),
-            }
+            # 5. Execute queries
+            self.log.info("Executing Cypher queries")
+            query_results, trace = await self.executor.execute(
+                planner_output, debug
+            )
+            self.log.info(
+                f"Executed {len(query_results)} queries, "
+                f"total rows: {sum(r.node_count for r in query_results)}"
+            )
 
-            self.log.info(f"retrieve_context completed with metadata: {metadata}")
-            return {
-                "context": context,
-                "semantic_matches": semantic_hits,
-                "seed_nodes": seed_nodes,
-                "context_payloads": context_payloads,
-                "metadata": metadata,
-            }
-        except Exception as error:
-            self.log.error(f"Error in retrieve_context: {error}", exc_info=True)
-            return {}
+            # 6. Render evidence context
+            raw_evidence = self.context_builder.build_context_from_results(
+                query_results, seeds
+            )
 
-    # Query preprocessing
+            # 7. Synthesize answer
+            limitations = list(planner_output.limitations)
+            self.log.info("Synthesizing answer from evidence")
+            answer = await self._synthesize_answer(cleaned, raw_evidence, limitations)
 
-    @staticmethod
-    def _preprocess_query(query: str) -> str:
-        """Normalise and clean the raw user query.
+            # 8. Package
+            return ExecutionResult(
+                answer=answer,
+                raw_evidence=raw_evidence,
+                matched_entities=seeds,
+                query_results=query_results,
+                plan_summary=planner_output.reasoning,
+                limitations=limitations,
+                debug_trace=trace,
+            )
 
-        - Strip leading/trailing whitespace
-        - Collapse multiple whitespace characters
-        - Strip surrounding quotes
+        except PlannerValidationError as e:
+            self.log.error(f"Planner validation failed: {e}", exc_info=True)
+            return ExecutionResult(
+                answer=f"I couldn't plan a query for your question: {e}",
+                raw_evidence="",
+                limitations=["planner_validation_failed"],
+            )
+        except Exception as e:
+            self.log.error(f"Pipeline error: {e}", exc_info=True)
+            return ExecutionResult(
+                answer=f"An error occurred while processing your question: {e}",
+                raw_evidence="",
+                limitations=["pipeline_error"],
+            )
+
+    async def _synthesize_answer(
+        self,
+        query: str,
+        evidence: str,
+        limitations: list[str],
+    ) -> str:
+        """Use the LLM to synthesize a natural-language answer from evidence.
+
+        Falls back to returning raw evidence if the LLM call fails.
         """
+        if not evidence or evidence == "No matching context found.":
+            return (
+                "I couldn't find relevant information in the Galaxy knowledge graph "
+                "to answer your question. Try rephrasing or asking about specific "
+                "tools, workflows, or their relationships."
+            )
+
+        limitations_text = (
+            "\n".join(f"- {l}" for l in limitations)
+            if limitations
+            else "None"
+        )
+
+        prompt = _SYNTHESIS_PROMPT.format(
+            query=query,
+            evidence=evidence,
+            limitations=limitations_text,
+        )
+
         try:
-            logging.getLogger(__class__.__name__).debug(f"Preprocessing query: '{query}'")
-            text = query.strip()
-            text = re.sub(r"\s+", " ", text)
-            if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
-                text = text[1:-1].strip()
-            logging.getLogger(__class__.__name__).debug(f"Preprocessed query: '{text}'")
-            return text
-        except Exception as error:
-            logging.getLogger(__class__.__name__).error(f"Error in _preprocess_query: {error}", exc_info=True)
-            return query.strip()
+            response = await get_llm_response(prompt)
+            if isinstance(response, str) and response.strip():
+                return response.strip()
+            if isinstance(response, dict):
+                # Some LLM providers return parsed JSON
+                return str(response.get("answer", response.get("content", str(response))))
+            return evidence
+        except Exception as e:
+            self.log.warning(
+                f"Answer synthesis failed, returning raw evidence: {e}",
+                exc_info=True,
+            )
+            return evidence
+
+
+def _preprocess_query(query: str) -> str:
+    """Normalise and clean the raw user query."""
+    text = query.strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+        text = text[1:-1].strip()
+    return text

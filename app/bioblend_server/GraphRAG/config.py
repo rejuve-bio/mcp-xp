@@ -1,53 +1,61 @@
+"""GraphRAG pipeline configuration.
+
+Environment variables for Neo4j connection and Pydantic-based pipeline config.
+"""
+
 from __future__ import annotations
 
 import os
+from typing import Any
+
 from dotenv import load_dotenv
-from enum import IntEnum
-from dataclasses import dataclass, fields
-from typing import Any, Dict, List
+from pydantic import BaseModel, Field
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Neo4j connection (from environment)
+# ---------------------------------------------------------------------------
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "neo4j")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
-# Mapping from node label to the primary ID field used for canonical IDs
-NODE_ID_FIELDS: Dict[str, List[str]] = {
-    "Workflow":   ["workflow_id", "file_name"],
-    "Step":       ["step_uid", "step_id", "name"],
-    "Tool":       ["tool_id", "id", "name"],
-    "ToolInput":  ["tool_input_uid", "id"],
-    "ToolOutput": ["tool_output_uid", "id"],
-    "Input":      ["input_uid", "name"],
-    "Output":     ["output_uid", "name"],
-    "Category":   ["category_id", "name"],
-}
+# ---------------------------------------------------------------------------
+# Budget configuration
+# ---------------------------------------------------------------------------
 
-# Pipeline Configuration
 
-@dataclass
-class GraphRAGConfig:
-    """Configuration for the Graph-RAG pipeline."""
+class BudgetConfig(BaseModel):
+    """Execution budget defaults for the GraphRAG pipeline."""
 
-    # Informer entity types to query (maps to Informer's entity_type param)
-    entity_types: List[str] = None
+    semantic_top_k: int = Field(default=8, ge=1, le=15)
+    max_seeds: int = Field(default=5, ge=1, le=15)
+    max_schemas_per_query: int = Field(default=5, ge=1, le=10)
+    max_query_limit: int = Field(default=100, ge=1, le=500)
+    path_max_hops: int = Field(default=4, ge=1, le=6)
+    compare_max_hops: int = Field(default=3, ge=1, le=4)
+    format_max_chars: int = Field(default=300, ge=50)
+    planner_max_retries: int = Field(default=1, ge=0, le=3)
 
-    def __post_init__(self):
-        if self.entity_types is None:
-            self.entity_types = ["tool", "workflow"]
+
+# ---------------------------------------------------------------------------
+# Pipeline configuration
+# ---------------------------------------------------------------------------
+
+
+class GraphRAGConfig(BaseModel):
+    """Top-level configuration for the GraphRAG pipeline."""
+
+    entity_types: list[str] = Field(default=["tool", "workflow"])
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
 
     @classmethod
-    def from_dict(cls, overrides: Dict[str, Any] | None) -> "GraphRAGConfig":
+    def from_dict(cls, overrides: dict[str, Any] | None) -> "GraphRAGConfig":
         if not overrides:
             return cls()
-        allowed_keys = {field_info.name for field_info in fields(cls)}
-        filtered = {key: value for key, value in overrides.items() if key in allowed_keys}
-        return cls(**filtered)
-
-
-class GraphRAGEnum(IntEnum):
-    FORMAT_SIZE = 300
-    MOST_USED_TOOL = 10
-    TOOl_IN_COMMUNITY = 10
+        return cls(**{
+            k: v for k, v in overrides.items()
+            if k in {f.alias or name for name, f in cls.model_fields.items()}
+        })
