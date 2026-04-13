@@ -1,52 +1,47 @@
-# Galaxy GraphRAG: Cypher-Native Graph Retrieval-Augmented Generation
+# Galaxy GraphRAG
 
-Graph-aware context retrieval for the Galaxy knowledge graph. Performs semantic search via Qdrant, expands results through targeted Cypher queries on Neo4j, and returns structured context for LLM consumption.
+LLM-planned graph retrieval-augmented generation over the Galaxy knowledge graph.
 
 ## Architecture
 
 ```
-query → pipeline.py → semantic_adapter.py → Qdrant (vector search)
-                     → graph_retriever.py  → neo4j_connector.py → Neo4j (Cypher expansion)
-                     → context_builder.py  → structured markdown context
+query
+  → semantic_adapter.py     → Qdrant (vector search)
+  → entity_resolver.py      → Neo4j (seed resolution)
+  → planner.py              → LLM (generates CypherQuerySchema JSON)
+  → cypher_builder.py       → parameterized Cypher (deterministic)
+  → executor.py             → Neo4j (query execution)
+  → context_builder.py      → Markdown evidence
+  → pipeline.py             → LLM (answer synthesis)
+  → server.py               → MCP tool response
 ```
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `config.py` | `NODE_ID_FIELDS`, `GraphRAGConfig` |
-| `neo4j_connector.py` | Cypher fetchers: workflow/tool/step context, global analytics, complex queries |
+| `schema.py` | KG schema constants: node labels, edge types, property mappings |
+| `models.py` | Pydantic v2 contracts: `CypherQuerySchema`, `PlannerOutput`, `ExecutionResult` |
+| `config.py` | Neo4j env vars, `BudgetConfig`, `GraphRAGConfig` |
+| `neo4j_connector.py` | Async Neo4j driver: `find_nodes_by_values`, `run_query` |
+| `entity_resolver.py` | Semantic hits → `ResolvedEntity` with `element_id` |
 | `semantic_adapter.py` | Wraps Informer's `SemanticSearcher` for GraphRAG |
-| `graph_retriever.py` | Maps semantic hits → Neo4j seed nodes → targeted Cypher payloads |
-| `context_builder.py` | Formats payloads into LLM-readable markdown context |
-| `pipeline.py` | Orchestrates retrieval with 3-mode routing |
-| `demo_graph_rag.py` | Standalone demo with sample queries |
+| `planner.py` | LLM-based planner: query + seeds → validated query schemas |
+| `cypher_builder.py` | Schema → parameterized Cypher (anchor, path, aggregate, compare) |
+| `executor.py` | Executes built queries with budget enforcement |
+| `context_builder.py` | Renders query results to structured Markdown evidence |
+| `pipeline.py` | 8-stage orchestration + LLM answer synthesis |
 
-## Query Modes
-
-| Mode | Use Case |
-|---|---|
-| `local` | Semantic search + graph expansion for specific entities |
-| `global` | Ecosystem-wide analytics (most used tools, communities) |
-| `complex` | Multi-hop queries: workflow comparison, tool connections, category drill-down |
-
-## Usage
-
-Exposed as the `graph_rag_query` MCP tool in `server.py`. Can also be used directly:
+## MCP Tool
 
 ```python
-from app.bioblend_server.GraphRAG.pipeline import GraphRAGPipeline
-
-result = await pipeline.retrieve_context(
-    query="Which tools are used in RNA-seq?",
-    query_type="local",   # or "global" or "complex"
-    top_k=15,
-)
-context = result["context"]  # structured markdown string
+graph_rag_query(query: str, debug: bool = False) -> DefaultTextResponses
 ```
+
+Single tool, natural-language input. The planner determines the retrieval strategy automatically.
 
 ## Requirements
 
-- Neo4j with Galaxy KG loaded
+- Neo4j with Galaxy KG loaded (`NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`)
 - Qdrant with indexed tool/workflow embeddings
-- Env vars: `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
+- LLM API configured via `CURRENT_LLM` (Gemini or OpenAI)
