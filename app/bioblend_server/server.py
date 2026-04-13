@@ -3,7 +3,7 @@ import re
 import json
 from fastmcp import FastMCP
 import logging
-from typing import Literal, Optional
+from typing import Optional
 import asyncio
 import httpx
 from contextlib import asynccontextmanager
@@ -30,16 +30,45 @@ from app.bioblend_server.background_runner import BackgroundIndexer
 from app.bioblend_server.informer.informer import GalaxyInformer
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
 
-from app.bioblend_server.GraphRAG.config import(
+from app.bioblend_server.GraphRAG.config import (
     NEO4J_URI,
     NEO4J_USER,
     NEO4J_PASSWORD,
-    NEO4J_DATABASE
+    NEO4J_DATABASE,
 )
-
 from app.bioblend_server.GraphRAG.neo4j_connector import Neo4jGraphConnector
 from app.bioblend_server.GraphRAG.semantic_adapter import InformerSemanticAdapter
 from app.bioblend_server.GraphRAG.pipeline import GraphRAGPipeline
+
+# Module-level lazy singletons for connection pooling
+_neo4j_connector: Neo4jGraphConnector | None = None
+_neo4j_lock = asyncio.Lock()
+_informer_manager = None
+_informer_lock = asyncio.Lock()
+
+
+async def _get_neo4j_connector() -> Neo4jGraphConnector:
+    global _neo4j_connector
+    if _neo4j_connector is None:
+        async with _neo4j_lock:
+            if _neo4j_connector is None:
+                _neo4j_connector = Neo4jGraphConnector(
+                    uri=NEO4J_URI,
+                    user=NEO4J_USER,
+                    password=NEO4J_PASSWORD,
+                    database=NEO4J_DATABASE,
+                )
+    return _neo4j_connector
+
+
+async def _get_informer_manager():
+    global _informer_manager
+    if _informer_manager is None:
+        async with _informer_lock:
+            if _informer_manager is None:
+                from app.bioblend_server.informer.manager import InformerManager
+                _informer_manager = await InformerManager.create()
+    return _informer_manager
 
 configure_logging()
 logger = logging.getLogger("fastmcp_bioblend_server")
@@ -160,67 +189,42 @@ async def get_galaxy_information_tool(
 
 
 # ==================================================================================================================================================================== #
-    ## Tool 2: GraphRAG knowledge retrieval, returns context from the Galaxy knowledge graph, this it to handle structural, complex and multi hop reasoning queries ##
+    ## Tool 2: GraphRAG knowledge retrieval — planner-driven graph reasoning ##
 # ==================================================================================================================================================================== #
 
 @bioblend_app.tool()
 async def graph_rag_query(
     query: str,
-    query_type: Literal["local", "global", "complex"] = "local",
-    compare_workflows_a: str = None,
-    compare_workflows_b: str = None,
-    connect_tools_a: str = None,
-    connect_tools_b: str = None,
-    category: str = None,
+    debug: bool = False,
 ) -> DefaultTextResponses:
     """
     Retrieve contextual knowledge from the Galaxy knowledge graph using GraphRAG.
 
-    This tool performs semantic retrieval combined with graph traversal over a
-    Neo4j knowledge graph of Galaxy tools and workflows. It is designed for
-    structural, complex and relationship-based queries that require reasoning over
-    connections between tools, workflows, or categories.
+    This tool uses an LLM-based planner to automatically determine the best
+    retrieval strategy for any query over the Galaxy knowledge graph.  It handles
+    entity lookups, multi-hop reasoning, workflow/tool comparisons, path finding,
+    category exploration, and ecosystem analytics — all from a single natural
+    language query.
 
-    Capabilities:
-    - Semantic search followed by graph expansion.
-    - Multi-hop reasoning over tool and workflow relationships.
-    - Workflow structure and tool connectivity analysis.
-    - Ecosystem-level insights from the knowledge graph.
-
-    Retrieval Modes:
-    - "local": Semantic search with graph expansion around relevant entities.
-    - "global": Ecosystem-level analysis (e.g., common tools, clusters).
-    - "complex": Multi-hop queries such as workflow comparisons or tool connection paths.
+    The planner generates structured query schemas that are converted to safe
+    parameterized Cypher, executed against Neo4j, and rendered as evidence
+    context.
 
     Args:
-        query (str): The user's natural language question with full context.
-        query_type (Literal["local", "global", "complex"]): Retrieval mode.
-        compare_workflows_a (Optional[str]): First workflow for comparison queries.
-        compare_workflows_b (Optional[str]): Second workflow for comparison queries.
-        connect_tools_a (Optional[str]): First tool for connection/path queries.
-        connect_tools_b (Optional[str]): Second tool for connection/path queries.
-        category (Optional[str]): Category name for graph exploration.
+        query: The user's natural language question with full context.
+        debug: If True, include planner reasoning and per-query timing in
+            the response.
 
     Returns:
-        DefaultTextResponses structured knowledge graph response.
+        DefaultTextResponses with structured knowledge graph evidence.
     """
-    
-    logger.info(f"GraphRAG query: '{query}', type='{query_type}'")
+    logger.info(f"GraphRAG query: '{query}', debug={debug}")
     try:
-        
-        from app.bioblend_server.informer.manager import InformerManager
         from app.bioblend_server.informer.search.semantic_searcher import SemanticSearcher
 
-        # 1. Neo4j connector
-        connector = Neo4jGraphConnector(
-            uri=NEO4J_URI,
-            user=NEO4J_USER,
-            password=NEO4J_PASSWORD,
-            database=NEO4J_DATABASE,
-        )
-
-        # 2. Semantic adapter
-        manager = await InformerManager.create()
+        # 1. Reusable singletons (module-level, thread-safe)
+        connector = await _get_neo4j_connector()
+        manager = await _get_informer_manager()
 
         user_api_key = current_api_key_server.get()
         galaxy_client = GalaxyClient(user_api_key) if user_api_key else None
@@ -241,34 +245,28 @@ async def graph_rag_query(
 
         # 3. Pipeline
         pipeline = GraphRAGPipeline(
-            graph_connector=connector,
+            connector=connector,
             semantic_adapter=adapter,
-            config={"log_level": "INFO"},
         )
 
-        # 4. Build optional complex query params
-        compare_workflows = None
-        if compare_workflows_a and compare_workflows_b:
-            compare_workflows = (compare_workflows_a, compare_workflows_b)
+        # 4. Execute
+        result = await pipeline.run(query=query, debug=debug)
 
-        connect_tools = None
-        if connect_tools_a and connect_tools_b:
-            connect_tools = (connect_tools_a, connect_tools_b)
+        # 5. Build response — include debug details when requested
+        if debug:
+            import json
+            debug_sections = [result.answer]
+            if result.raw_evidence:
+                debug_sections.append(f"\n--- Raw Evidence ---\n{result.raw_evidence}")
+            if result.plan_summary:
+                debug_sections.append(f"\n--- Plan Summary ---\n{result.plan_summary}")
+            if result.limitations:
+                debug_sections.append(f"\n--- Limitations ---\n" + "\n".join(f"- {l}" for l in result.limitations))
+            if result.debug_trace:
+                debug_sections.append(f"\n--- Debug Trace ---\n{json.dumps(result.debug_trace, indent=2, default=str)}")
+            return DefaultTextResponses(response="\n".join(debug_sections))
 
-        # 5. Execute
-        result = await pipeline.retrieve_context(
-            query=query,
-            query_type=query_type,
-            top_k=15,
-            compare_workflows=compare_workflows,
-            connect_tools=connect_tools,
-            category=category,
-        )
-
-        context = result.get("context", "No context found.") # TODO: have an LLM interprated response instead of just passing the response.
-        connector.close()
-
-        return DefaultTextResponses(response=context)
+        return DefaultTextResponses(response=result.answer)
 
     except Exception as e:
         logger.error(f"GraphRAG query failed: {e}", exc_info=True)
