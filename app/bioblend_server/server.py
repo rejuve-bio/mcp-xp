@@ -30,6 +30,46 @@ from app.bioblend_server.background_runner import BackgroundIndexer
 from app.bioblend_server.informer.informer import GalaxyInformer
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
 
+from app.bioblend_server.GraphRAG.config import (
+    NEO4J_URI,
+    NEO4J_USER,
+    NEO4J_PASSWORD,
+    NEO4J_DATABASE,
+)
+from app.bioblend_server.GraphRAG.neo4j_connector import Neo4jGraphConnector
+from app.bioblend_server.GraphRAG.semantic_adapter import InformerSemanticAdapter
+from app.bioblend_server.GraphRAG.pipeline import GraphRAGPipeline
+
+# Module-level lazy singletons for connection pooling
+_neo4j_connector: Neo4jGraphConnector | None = None
+_neo4j_lock = asyncio.Lock()
+_informer_manager = None
+_informer_lock = asyncio.Lock()
+
+
+async def _get_neo4j_connector() -> Neo4jGraphConnector:
+    global _neo4j_connector
+    if _neo4j_connector is None:
+        async with _neo4j_lock:
+            if _neo4j_connector is None:
+                _neo4j_connector = Neo4jGraphConnector(
+                    uri=NEO4J_URI,
+                    user=NEO4J_USER,
+                    password=NEO4J_PASSWORD,
+                    database=NEO4J_DATABASE,
+                )
+    return _neo4j_connector
+
+
+async def _get_informer_manager():
+    global _informer_manager
+    if _informer_manager is None:
+        async with _informer_lock:
+            if _informer_manager is None:
+                from app.bioblend_server.informer.manager import InformerManager
+                _informer_manager = await InformerManager.create()
+    return _informer_manager
+
 configure_logging()
 logger = logging.getLogger("fastmcp_bioblend_server")
 
@@ -62,7 +102,7 @@ async def mcp_galaxy_lifespan(server: FastMCP):
     
     
 # ==================================== #
-     ## MCP Server ##
+     ## The Galaxy MCP Server ##
 # ==================================== #
 
 bioblend_app = FastMCP(
@@ -80,7 +120,7 @@ bioblend_app = FastMCP(
 
 
 # =============================================================================================================================================================== #
-    ## Tool 2: Galaxy assitant recommendation tool, gives details on galaxy datasets, tools, and workflows both in and outside of the connected galaxy instance ##
+    ## Tool 1: Galaxy assitant recommendation tool, gives details on galaxy datasets, tools, and workflows both in and outside of the connected galaxy instance ##
 # =============================================================================================================================================================== #
 
 @bioblend_app.tool()
@@ -88,25 +128,42 @@ async def get_galaxy_information_tool(
     query: str,
     query_type: str,
     entity_id: str = None
-) -> DefaultTextResponses:
+) -> InformerResponse:
     """
-    Fetch detailed information on Galaxy tools, workflows, datasets, and invocations.
+    Fetch detailed information about Galaxy tools, workflows, datasets, and workflow invocations.
 
-    This tool handles all information requests about Galaxy entities, based on
-    the `query_type` (tool, workflow, dataset) and the user's `query`.
-    Use `entity_id` only when the user's query explicitly includes an ID.
+    This tool performs semantic and fuzzy search over Galaxy entities and can access
+    information from the connected Galaxy instance (user-specific, real-time state) 
+    as well as global Galaxy data. It is intended for retrieving factual metadata 
+    about specific entities and interacting with the user's Galaxy environment.
+
+    Use this tool when:
+    - The user asks for a recommendation of a tool/workflow.
+    - The user asks for details about a specific tool, workflow, or dataset.
+    - The query involves workflow invocations or dataset metadata.
+    - The user may want to execute or import a workflow/tool.
+    - Real-time or instance-specific information is required.
+
+    Do NOT use this tool when:
+    - The query focuses on relationships between multiple tools or workflows.
+    - The question requires structural reasoning or ecosystem-level analysis.
+
+    Capabilities:
+    - Semantic and fuzzy search over Galaxy tools, workflows, and datasets.
+    - Retrieves metadata: descriptions, parameters, dataset info, workflow structure.
+    - Returns actionable links when available (e.g., execute workflow, import workflow, open tool).
 
     Args:
-        query: The user's query message that needs a response, accompanied by full and detailed contextual information.
-        query_type: The type of Galaxy entity the query needs a response for, with one of three values: "tool", "dataset", or "workflow".
-                    Select "workflow" for general workflow details and specific workflow invocation details.
-        entity_id: Optional parameter. Provide this only when the user's query explicitly includes an ID,
-                   allowing retrieval of information by that specific entity ID.
+        query (str): The user's natural language query with full context.
+        query_type (str): Galaxy entity type ("tool", "dataset", or "workflow").
+        entity_id (Optional[str]): Explicit Galaxy entity ID if provided.
 
     Returns:
-       DefaultTextResponses: A string containing the detailed Galaxy information and the response to the user's query. and a dict with action links of the information fetched.
-        
+        InformerResponse containing:
+            - response: Detailed textual answer.
+            - actions: Optional actionable operations (Execute or Import) with links.
     """
+    
     logger.info(f"Calling get_galaxy_information with query='{query}', query_type='{query_type}', entity_id='{entity_id}'")
     try:
         # Get current user
@@ -125,14 +182,99 @@ async def get_galaxy_information_tool(
     
     except GalaxyConnectionError as e:
         logger.error(f"Failed to connect to Galaxy: {e}")
-        return DefaultTextResponses(response=f"Failed to connect to Galaxy: {e}")
+        return InformerResponse(response="Failed to connect to Galaxy.", actions=None)
     except Exception as e:
         logger.error(f"Error in get_galaxy_information_tool: {e}", exc_info=True)
-        return DefaultTextResponses(response=f"An error occurred while fetching Galaxy information: {e}")
+        return InformerResponse(response="An error occurred while fetching Galaxy information.", actions=None)
+
+
+# ==================================================================================================================================================================== #
+    ## Tool 2: GraphRAG knowledge retrieval — planner-driven graph reasoning ##
+# ==================================================================================================================================================================== #
+
+@bioblend_app.tool()
+async def graph_rag_query(
+    query: str,
+    debug: bool = False,
+) -> DefaultTextResponses:
+    """
+    Retrieve contextual knowledge from the Galaxy knowledge graph using GraphRAG.
+
+    This tool uses an LLM-based planner to automatically determine the best
+    retrieval strategy for any query over the Galaxy knowledge graph.  It handles
+    entity lookups, multi-hop reasoning, workflow/tool comparisons, path finding,
+    category exploration, and ecosystem analytics — all from a single natural
+    language query.
+
+    The planner generates structured query schemas that are converted to safe
+    parameterized Cypher, executed against Neo4j, and rendered as evidence
+    context.
+
+    Args:
+        query: The user's natural language question with full context.
+        debug: If True, include planner reasoning and per-query timing in
+            the response.
+
+    Returns:
+        DefaultTextResponses with structured knowledge graph evidence.
+    """
+    logger.info(f"GraphRAG query: '{query}', debug={debug}")
+    try:
+        from app.bioblend_server.informer.search.semantic_searcher import SemanticSearcher
+
+        # 1. Reusable singletons (module-level, thread-safe)
+        connector = await _get_neo4j_connector()
+        manager = await _get_informer_manager()
+
+        user_api_key = current_api_key_server.get()
+        galaxy_client = GalaxyClient(user_api_key) if user_api_key else None
+        username = galaxy_client.whoami if galaxy_client else "default_user"
+
+        semantic_searcher = SemanticSearcher(
+            vector_manager=manager,
+            entity_type="tool",
+            username=username,
+            score_threshold=0.3,
+            limit=10,
+        )
+
+        adapter = InformerSemanticAdapter(
+            semantic_searcher=semantic_searcher,
+            entity_types=["tool", "workflow"],
+        )
+
+        # 3. Pipeline
+        pipeline = GraphRAGPipeline(
+            connector=connector,
+            semantic_adapter=adapter,
+        )
+
+        # 4. Execute
+        result = await pipeline.run(query=query, debug=debug)
+
+        # 5. Build response — include debug details when requested
+        if debug:
+            import json
+            debug_sections = [result.answer]
+            if result.raw_evidence:
+                debug_sections.append(f"\n--- Raw Evidence ---\n{result.raw_evidence}")
+            if result.plan_summary:
+                debug_sections.append(f"\n--- Plan Summary ---\n{result.plan_summary}")
+            if result.limitations:
+                debug_sections.append(f"\n--- Limitations ---\n" + "\n".join(f"- {l}" for l in result.limitations))
+            if result.debug_trace:
+                debug_sections.append(f"\n--- Debug Trace ---\n{json.dumps(result.debug_trace, indent=2, default=str)}")
+            return DefaultTextResponses(response="\n".join(debug_sections))
+
+        return DefaultTextResponses(response=result.answer)
+
+    except Exception as e:
+        logger.error(f"GraphRAG query failed: {e}", exc_info=True)
+        return DefaultTextResponses(response=f"GraphRAG query failed: {str(e)}")
     
 
 # ========================================================================================================== #
-    ## Tool 2: Invocaiton Analyzing tool, analyzes, summarizes and recommends fixes for failed invocaiton. ##
+    ## Tool 3: Invocation Analyzing tool, analyzes, summarizes and recommends fixes for failed invocaiton. ##
 # ========================================================================================================== #
 
 @bioblend_app.tool()
@@ -141,21 +283,22 @@ async def explain_galaxy_workflow_invocation(
     failure: bool
 ) -> DefaultTextResponses:
     """
-    Generates a detailed explanation of a Galaxy workflow invocation.
+    Analyze a Galaxy workflow invocation and generate a detailed report.
 
-    This function retrieves and analyzes metadata for a given Galaxy workflow invocation.
-    It either summarizes successful outputs or provides diagnostic details for failed jobs,
-    and suggest fixes for workflow invocation.
+    This tool retrieves metadata for a specific Galaxy workflow invocation. 
+    It summarizes output datasets for successful jobs or provides diagnostic details 
+    and actionable suggestions for failed jobs.
+
+    Use this tool when:
+    - The user wants a summary of workflow outputs.
+    - The user needs diagnostics and suggested fixes for failed workflow runs.
 
     Args:
-        invocation_id (str): 
-            The unique identifier of the Galaxy workflow invocation to analyze.
-        failure (bool): 
-            Indicates whether to focus on failed job diagnostics (`True`) or 
-            output dataset summaries (`False`), if empty it defaults to false.
+        invocation_id (str): Unique identifier of the Galaxy workflow invocation to analyze.
+        failure (bool, optional): Focus on failed job diagnostics (`True`) or output summaries (`False`). Defaults to `False`.
 
     Returns:
-        DefaultTextResponses: A clear report of the workflow invocation results or a report explaining failure causes with actionable suggestions.
+        DefaultTextResponses: A detailed report of workflow outputs or failure diagnostics with actionable suggestions.
     """
     
     # Get current user
@@ -214,7 +357,7 @@ async def explain_galaxy_workflow_invocation(
 
 
 # ============================================================ #
-    ## Tool 3: Workflow Importing tool after recommendation. ##
+    ## Tool 4: Workflow Importing tool after recommendation. ##
 # ============================================================ #
 
 @bioblend_app.tool()
@@ -224,14 +367,20 @@ async def import_workflow_to_galaxy_instance(
     # TODO: No Galaxy duplicate check add that.
     
     """
-    Imports a Galaxy workflow from the IWC workflow repository, fetching the workflow JSON,
-    and uploading it to the Galaxy instance. Handles tool installation and ensures the workflow is added to the user's list.
+    Import a Galaxy workflow from the IWC or WorkflowHUB repository into the user's Galaxy instance.
+
+    This tool fetches the workflow JSON, uploads it to the connected Galaxy instance,
+    and ensures any required tools are installed. The workflow is then added to the
+    user's workflow list.
+
+    Use this tool when:
+    - The user wants to import an workflow.
 
     Args:
-        workflow_name (str): The Full and exact name of the workflow to import.
+        workflow_name (str): Full and exact name of the workflow to import.
 
     Returns:
-        DefaultTextResponses: A message indicating the import status or an error description.
+        DefaultTextResponses: Message indicating the import status or an error description.
     """
     try:
         
