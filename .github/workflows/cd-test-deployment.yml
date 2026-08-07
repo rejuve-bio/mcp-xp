@@ -14,6 +14,13 @@ name: CD Test - dry-run deploy simulation
 # No secrets are read, no cluster is contacted, no email is sent.
 
 on:
+  # Fires on every push to this branch — the only trigger type that
+  # actually runs a workflow whose file is not yet on the default
+  # branch.  Once the file lands on develop, workflow_dispatch and
+  # repository_dispatch below become usable too.
+  push:
+    branches:
+      - feat/deploy-test-workflow
   workflow_dispatch:
     inputs:
       target:
@@ -46,20 +53,34 @@ jobs:
         id: vars
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TARGET="${{ inputs.target }}"
-            TAG="${{ inputs.image_tag }}"
-          else
-            ACTION="${{ github.event.action }}"
-            case "$ACTION" in
-              *production*) TARGET="production" ;;
-              *)            TARGET="staging" ;;
-            esac
-            TAG="${{ github.event.client_payload.image_tag }}"
-            if [ -z "$TAG" ]; then
-              TAG="$TARGET"
-            fi
-          fi
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              TARGET="${{ inputs.target }}"
+              TAG="${{ inputs.image_tag }}"
+              ;;
+            repository_dispatch)
+              ACTION="${{ github.event.action }}"
+              case "$ACTION" in
+                *production*) TARGET="production" ;;
+                *)            TARGET="staging" ;;
+              esac
+              TAG="${{ github.event.client_payload.image_tag }}"
+              if [ -z "$TAG" ]; then
+                TAG="$TARGET"
+              fi
+              ;;
+            push)
+              # push trigger — no inputs, no payload.  Default to staging
+              # + the short SHA as the "image tag" so we can see the
+              # substitution works with real values.
+              TARGET="staging"
+              TAG="sha-$(git rev-parse --short HEAD)"
+              ;;
+            *)
+              TARGET="staging"
+              TAG="unknown"
+              ;;
+          esac
           NAMESPACE="mcp-xp-${TARGET}"
           {
             echo "target=$TARGET"
