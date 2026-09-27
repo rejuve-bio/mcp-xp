@@ -18,7 +18,12 @@ from starlette.types import ASGIApp
 from starlette.status import HTTP_204_NO_CONTENT
 
 import jwt
-from app.context import current_api_key, current_user_email
+from app.context import (
+    current_api_key,
+    current_user_email,
+    current_chat_id,
+    validate_chat_id,
+)
 
 from app.exceptions import UnauthorizedException
 
@@ -83,6 +88,9 @@ class JWTGalaxyKeyMiddleware(BaseHTTPMiddleware):
             # set the context for downstream handlers
             current_api_key.set(apikey)
             current_user_email.set(payload.get("email"))
+            current_chat_id.set(
+                validate_chat_id(request.headers.get("X-Chat-Id") or request.headers.get("x-chat-id"))
+            )
             return await call_next(request)
         
         except UnauthorizedException as e:

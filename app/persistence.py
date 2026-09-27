@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from dotenv import load_dotenv
 from typing import Any, Optional, List, Iterable
@@ -546,3 +547,51 @@ class MongoStore:
             self.log.debug(f"Deleted fields {fields} from {collection_name}:{key}")
         except errors.PyMongoError as exc:
             self.log.error(f"Failed to delete fields {fields} from {collection_name}:{key} - {exc}")
+
+    async def find_by_value_field(
+        self,
+        collection_name: str,
+        field_path: str,
+        value: Any,
+        key_prefix: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[dict]:
+        """Return `[{key, value}, ...]` for documents whose nested `value.<field_path>` equals `value`.
+
+        When `key_prefix` is provided, only docs whose `key` starts with `{key_prefix}:`
+        are returned — used to scope reverse lookups by username so cross-user reuse
+        of the same field value cannot leak records across users.
+        """
+
+        await self._ensure_indexes(collection_name)
+
+        query: dict = {f"value.{field_path}": value}
+        if key_prefix:
+            if not isinstance(key_prefix, str) or not key_prefix.strip():
+                raise ValueError("key_prefix must be a non-empty string when provided.")
+            query["key"] = {"$regex": f"^{re.escape(key_prefix)}:"}
+
+        @retry(
+            stop=stop_after_attempt(self._max_retries),
+            wait=wait_fixed(self._retry_delay_seconds),
+            retry=retry_if_exception_type(errors.PyMongoError),
+            reraise=True,
+        )
+        async def fetch():
+            results: List[dict] = []
+            cursor = self._db[collection_name].find(
+                query, {"_id": 0, "key": 1, "value": 1}
+            ).limit(limit)
+            async for doc in cursor:
+                results.append(doc)
+            return results
+
+        try:
+            return await fetch()
+        except errors.PyMongoError as exc:
+            self.log.error(
+                f"Failed to find by value field '{field_path}' in {collection_name} after retries."
+            )
+            raise RuntimeError(
+                f"Failed to find by value field '{field_path}'."
+            ) from exc

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from typing import List, Optional
 import logging
 
@@ -8,6 +9,7 @@ path.append(".")
 from fastapi import Response
 from starlette.status import HTTP_204_NO_CONTENT
 
+from app.context import current_chat_id
 from app.galaxy import GalaxyClient
 from app.persistence import MongoStore
 from app.api.schemas import invocation, workflow
@@ -47,7 +49,37 @@ class InvocationService:
         self.inv_tracker = InvocationTracker(cache = self.cache, redis_client = self.cache.redis, inv_data_manager = self.inv_data_manager)
         self.mongo_client = mongo_client
         self.log = logging.getLogger(__class__.__name__)
-    
+
+    async def _resolve_chat_id(self, username: str, invocation_id: str) -> Optional[str]:
+        """Return the chat_id associated with this invocation using write-once semantics.
+
+        If a meta record already exists for `(username, invocation_id)`, its chat_id
+        wins — later views from a different chat context do not overwrite it. If no
+        meta record exists and the current request has a chat_id, we write one now
+        and return it. Otherwise return None.
+        """
+        meta_key = f"{username}:{invocation_id}"
+        existing = await self.mongo_client.get(
+            collection_name=CollectionNames.INVOCATION_META.value,
+            key=meta_key,
+        )
+        if isinstance(existing, dict) and existing.get("chat_id"):
+            return existing["chat_id"]
+
+        request_chat_id = current_chat_id.get()
+        if not request_chat_id:
+            return None
+
+        await self.mongo_client.set(
+            collection_name=CollectionNames.INVOCATION_META.value,
+            key=meta_key,
+            value={
+                "chat_id": request_chat_id,
+                "first_seen_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return request_chat_id
+
     async def list_invocations(
         self,
         username: str,
@@ -383,6 +415,8 @@ class InvocationService:
             # If pending-like, trigger background tracking if not already
             tracking_key = f"tracking:{username}:{invocation_id}"
             
+            resolved_chat_id = await self._resolve_chat_id(username, invocation_id)
+
             if inv_state == InvocationStates.PENDING.value:
                 invocation_result = {
                     "invocation_id" : invocation_details.get("id"),
@@ -393,7 +427,8 @@ class InvocationService:
                     "inputs" : inputs_formatted,
                     "result" : [],
                     "workflow" : workflow_description.model_dump(),
-                    "report" : None 
+                    "report" : None,
+                    "chat_id" : resolved_chat_id,
                 }
                 
                 await self.cache.set_invocation_result(
@@ -435,7 +470,8 @@ class InvocationService:
                     "inputs" : inputs_formatted,
                     "result" : [],
                     "workflow" : workflow_description.model_dump(),
-                    "report" : invocation_report 
+                    "report" : invocation_report,
+                    "chat_id" : resolved_chat_id,
                 }
                 
                 await self.cache.set_invocation_result(
@@ -600,3 +636,86 @@ class InvocationService:
         except Exception as e:
             self.log.error(f"Partial failure handling also failed: {e}")
             raise
+
+    async def list_invocations_by_chat(
+        self,
+        username: str,
+        chat_id: str,
+    ) -> invocation.InvocationList:
+        """List invocations tagged with `chat_id` for the given `username`.
+
+        Cross-user scoping is enforced by the meta collection key prefix
+        (`{username}:{invocation_id}`), so two users sharing the same chat_id
+        string still see disjoint results. Full invocation shape is hydrated
+        from the persisted INVOCATION_LISTS entry when present; otherwise a
+        minimal placeholder is returned so pending/unlisted invocations still
+        surface.
+        """
+        try:
+            meta_hits = await self.mongo_client.find_by_value_field(
+                collection_name=CollectionNames.INVOCATION_META.value,
+                field_path="chat_id",
+                value=chat_id,
+                key_prefix=username,
+            )
+            if not meta_hits:
+                return invocation.InvocationList(invocations=[])
+
+            prefix = f"{username}:"
+            invocation_ids = {
+                hit["key"][len(prefix):]
+                for hit in meta_hits
+                if isinstance(hit.get("key"), str) and hit["key"].startswith(prefix)
+            }
+
+            stored_list = await self.mongo_client.get(
+                collection_name=CollectionNames.INVOCATION_LISTS.value,
+                key=username,
+            ) or []
+
+            items: List[invocation.InvocationListItem] = []
+            seen_ids = set()
+            for stored in stored_list:
+                stored_id = stored.get("id")
+                if stored_id in invocation_ids:
+                    stored = {**stored, "chat_id": chat_id}
+                    try:
+                        items.append(invocation.InvocationListItem(**stored))
+                        seen_ids.add(stored_id)
+                    except Exception as parse_exc:
+                        self.log.warning(
+                            f"Skipping malformed stored invocation {stored_id}: {parse_exc}"
+                        )
+
+            missing_ids = invocation_ids - seen_ids
+            for missing_id in missing_ids:
+                cached_result = await self.cache.get_invocation_result(username, missing_id)
+                if not cached_result:
+                    cached_result = await self.mongo_client.get(
+                        collection_name=CollectionNames.INVOCATION_RESULTS.value,
+                        key=f"{username}:{missing_id}",
+                    )
+                if not cached_result:
+                    continue
+                workflow_info = cached_result.get("workflow") or {}
+                try:
+                    items.append(invocation.InvocationListItem(
+                        id=missing_id,
+                        workflow_name=workflow_info.get("name", "Unknown"),
+                        workflow_id=workflow_info.get("id", ""),
+                        history_id=cached_result.get("history_id", ""),
+                        state=cached_result.get("state", InvocationStates.PENDING.value),
+                        outputs=[],
+                        create_time=cached_result.get("create_time", ""),
+                        update_time=cached_result.get("update_time", ""),
+                        chat_id=chat_id,
+                    ))
+                except Exception as parse_exc:
+                    self.log.warning(
+                        f"Skipping unlisted invocation {missing_id}: {parse_exc}"
+                    )
+
+            return invocation.InvocationList(invocations=items)
+        except Exception as e:
+            self.log.error(f"Failed to list invocations by chat_id: {e}", exc_info=True)
+            raise InternalServerErrorException("Failed to list invocations by chat_id")
