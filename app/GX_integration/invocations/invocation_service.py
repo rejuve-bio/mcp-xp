@@ -323,13 +323,15 @@ class InvocationService:
             cached_result = await self.cache.get_invocation_result(username, invocation_id)
             if cached_result:
                 self.log.info("fetching workflow invocation result from cache.")
+                cached_result["chat_id"] = await self._resolve_chat_id(username, invocation_id)
                 return invocation.InvocationResult(**cached_result)
-            
+
             stored_result = await self.mongo_client.get(collection_name = CollectionNames.INVOCATION_RESULTS.value, key = f"{username}:{invocation_id}")
-            
+
             if stored_result:
                 await self.cache.set_invocation_result(username = username, invocation_id = invocation_id, result = stored_result)
                 self.log.info("fetching workflow invocation result from database.")
+                stored_result["chat_id"] = await self._resolve_chat_id(username, invocation_id)
                 return invocation.InvocationResult(**stored_result)
 
             # Step 3: Fetch invocation for preliminary info
