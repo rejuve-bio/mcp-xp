@@ -125,6 +125,7 @@ class CollectionNames(Enum):
     INVOCATION_RESULTS = "InvocationResults"
     DELETED_INVOCATIONS = "DeletedInvocation"
     INVOCATION_STATES = "InvocationStates"
+    INVOCATION_META = "InvocationMeta"
     
 class IndexingResponses(Enum):
     PENDING_MESSAGE = "Data Indexing in progress."

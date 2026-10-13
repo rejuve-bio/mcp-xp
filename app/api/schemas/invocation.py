@@ -14,6 +14,7 @@ class InvocationListItem(BaseModel):
     outputs: List[DatasetInfo]
     create_time: str
     update_time: str
+    chat_id: Optional[str] = None
 
 class InvocationList(BaseModel):
     invocations: List[InvocationListItem]
@@ -39,3 +40,4 @@ class InvocationResult(BaseModel):
                             ]] = []
     workflow:WorkflowListItem
     report : Optional[str] = None
+    chat_id: Optional[str] = None
