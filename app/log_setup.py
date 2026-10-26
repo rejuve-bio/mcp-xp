@@ -16,5 +16,5 @@ def configure_logging():
     root_logger.addHandler(stream_handler)
 
     # Set noisy logs to critical to decrease confusion.
-    for noisy_logger in ["bioblend", "requests", "urllib3", "httpx"]:
+    for noisy_logger in ["bioblend", "requests", "urllib3", "httpx", "neo4j.notifications"]:
         logging.getLogger(noisy_logger).setLevel(logging.CRITICAL)

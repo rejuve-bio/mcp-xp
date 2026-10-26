@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import redis
 
-from typing import Optional, Literal, Any
+from typing import List, Optional, Literal, Any
 from pydantic import BaseModel 
 
 from app.log_setup import configure_logging
@@ -38,16 +38,16 @@ inv_data_manager = InvocationDataManager(cache = invocation_cache, background_ta
 
 # Pydantic model for the MCP server responses
 class MCPActions(BaseModel):
-    """Action Lookup for the MCP server."""
-    
+    """Represents an actionable operation returned by the Galaxy Informer tool."""
+
     action: Literal["Execute", "Import"]
     link: Optional[str] = None
-    
+
 class InformerResponse(BaseModel):
-    """The Galaxy Informer tool response schema."""
-    
+    """Response schema returned by the Galaxy Informer tool."""
+
     response: str
-    actions: dict[str,MCPActions]
+    actions: Optional[List[MCPActions]] = None
     
 class DefaultTextResponses(BaseModel):
     """Default Text repsponse of the MCP server."""

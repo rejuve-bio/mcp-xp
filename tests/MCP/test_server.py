@@ -54,6 +54,12 @@ def mock_to_thread():
 @pytest.fixture
 def mock_create_task():
     with patch("app.bioblend_server.server.asyncio.create_task") as mock:
+        def _close_scheduled_coroutine(coro):
+            if hasattr(coro, "close"):
+                coro.close()
+            return Mock(name="scheduled_task")
+
+        mock.side_effect = _close_scheduled_coroutine
         yield mock
 
 
@@ -119,7 +125,7 @@ class TestGetGalaxyInformationTool:
         # Create informer instance mock
         mock_informer_instance = AsyncMock()
         mock_informer_instance.get_entity_info = AsyncMock(
-            return_value=("Tool information result", {})
+            return_value=("Tool information result", [])
         )
 
         # Make create an AsyncMock (not just set return_value)
@@ -132,6 +138,7 @@ class TestGetGalaxyInformationTool:
 
         # Assert - result is now an InformerResponse Pydantic model
         assert result.response == "Tool information result"
+        assert result.actions == []
         mock_galaxy_informer.create.assert_called_once()
         mock_informer_instance.get_entity_info.assert_called_once_with(
             search_query="Show me alignment tools", entity_id=None
@@ -157,7 +164,7 @@ class TestGetGalaxyInformationTool:
 
         mock_informer_instance = AsyncMock()
         mock_informer_instance.get_entity_info = AsyncMock(
-            return_value=("Workflow details", {})
+            return_value=("Workflow details", [])
         )
         mock_galaxy_informer.create = AsyncMock(return_value=mock_informer_instance)
 
@@ -169,6 +176,7 @@ class TestGetGalaxyInformationTool:
 
         # Assert - result is now an InformerResponse Pydantic model
         assert result.response == "Workflow details"
+        assert result.actions == []
         mock_informer_instance.get_entity_info.assert_called_once_with(
             search_query="Get workflow details", entity_id="workflow_123"
         )
@@ -176,37 +184,45 @@ class TestGetGalaxyInformationTool:
 
     @pytest.mark.asyncio
     async def test_missing_api_key(
-        self, mock_current_api_key_server, informer_test_log
+        self, mock_current_api_key_server, informer_test_log, caplog
     ):
         """Test error handling when API key is missing"""
 
         informer_test_log.info("TEST: test_missing_api_key starting")
         mock_current_api_key_server.get.return_value = None
+        caplog.set_level(logging.ERROR)
 
         result = await get_galaxy_information_tool(
             query="test query", query_type="tool"
         )
 
-        assert "error" in result.response.lower()
-        assert "current user api-key is missing" in result.response.lower()
+        assert result.response == "An error occurred while fetching Galaxy information."
+        assert result.actions is None
+        assert "current user api-key is missing" in caplog.text
         informer_test_log.info("TEST: test_missing_api_key PASSED")
 
     @pytest.mark.asyncio
     async def test_galaxy_client_exception(
-        self, mock_current_api_key_server, mock_galaxy_client, informer_test_log
+        self,
+        mock_current_api_key_server,
+        mock_galaxy_client,
+        informer_test_log,
+        caplog,
     ):
         """Test exception handling during Galaxy client operations"""
 
         informer_test_log.info("TEST: test_galaxy_client_exception starting.")
         mock_current_api_key_server.get.return_value = "test_api_key"
         mock_galaxy_client.side_effect = Exception("Connection failed")
+        caplog.set_level(logging.ERROR)
 
         result = await get_galaxy_information_tool(
             query="test query", query_type="tool"
         )
 
-        assert "error" in result.response.lower()
-        assert "connection failed" in result.response.lower()
+        assert result.response == "An error occurred while fetching Galaxy information."
+        assert result.actions is None
+        assert "Connection failed" in caplog.text
         informer_test_log.info("TEST: test_galaxy_client_exception PASSED.")
 
 
