@@ -1,4 +1,4 @@
-"""/v1/galaxy: run any Galaxy tool or workflow from a chat thread.
+"""/v1/galaxy: run any Galaxy tool or workflow from a chat thread; /v1/datasets: move its files.
 
 Every route answers at once. Runs are read again until they end; see app/galaxy_runs/service.py.
 """
@@ -9,13 +9,15 @@ import logging
 from typing import Dict, Literal, Optional, Tuple
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
+from bioblend import ConnectionError as GalaxyConnectionError
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 
 from app.context import current_api_key
 from app.galaxy import GalaxyClient
 from app.persistence import MongoStore
 from app.api.schemas.galaxy_runs import DescribeRequest, LinkRequest, RunRequest, ValidateRequest
+from app.galaxy_runs import datasets
 from app.galaxy_runs.service import GalaxyRuns, GalaxyRunsError
 from app.galaxy_runs.store import RunStore
 
@@ -40,7 +42,12 @@ async def galaxy_runs() -> GalaxyRuns:
     if cached and cached[1] > time.monotonic():
         username = cached[0]
     else:
-        username = await run_in_threadpool(lambda: client.whoami)
+        try:
+            username = await run_in_threadpool(lambda: client.whoami)
+        except GalaxyConnectionError as e:
+            if getattr(e, "status_code", None) in (401, 403):
+                raise HTTPException(status_code=401, detail="Galaxy did not accept the user's key")
+            raise HTTPException(status_code=502, detail="Galaxy failed. Safe to retry.")
         if not isinstance(username, str) or not username:
             raise HTTPException(status_code=401, detail="Galaxy did not recognise the user")
         _USERNAMES[api_key] = (username, time.monotonic() + _USERNAME_TTL)
@@ -125,5 +132,31 @@ async def cancel_run(run_id: str = Path(..., min_length=1, max_length=64), svc: 
 async def link(body: LinkRequest, svc: GalaxyRuns = Depends(galaxy_runs)):
     try:
         return await svc.link(body.thread_id, body.proposal_id, body.target.model_dump(), body.inputs, body.parameters)
+    except GalaxyRunsError as e:
+        raise _http(e)
+
+
+# ---------------------------------------------------------------- /v1/datasets
+
+datasets_router = APIRouter()
+
+
+@datasets_router.post("/upload", status_code=201, summary="Upload a file into the thread's Galaxy history")
+async def upload_dataset(request: Request, svc: GalaxyRuns = Depends(galaxy_runs)):
+    """Multipart { thread_id, file, format? }, thread_id before file. Streamed to Galaxy without a temporary file;
+    returns at once with the dataset, whose state goes queued -> ok as Galaxy processes the upload."""
+    try:
+        return await datasets.upload(svc, request.headers.get("content-type"),
+                                     request.headers.get("content-length"), request.stream())
+    except GalaxyRunsError as e:
+        raise _http(e)
+
+
+@datasets_router.get("/{dataset_id}/download", summary="A dataset's bytes, streamed, with Range passed through")
+async def download_dataset(request: Request, dataset_id: str = Path(..., min_length=1, max_length=64),
+                           metadata_file: Optional[str] = Query(None, description="e.g. bam_index or tabix_index"),
+                           svc: GalaxyRuns = Depends(galaxy_runs)):
+    try:
+        return await datasets.download(svc, dataset_id, request.headers.get("range"), metadata_file)
     except GalaxyRunsError as e:
         raise _http(e)

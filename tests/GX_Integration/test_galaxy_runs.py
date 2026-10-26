@@ -184,6 +184,7 @@ def _fake_gi():
         "outputs": [{"id": "o1", "name": "fastp on S1", "file_ext": "fastqsanger.gz"},
                     {"id": "o2", "name": "fastp on S2", "file_ext": "fastqsanger.gz"}],
     }
+    gi.datasets.show_dataset.return_value = {"id": "f2db", "name": "reads_R1", "extension": "fastqsanger.gz", "state": "ok"}
     gi.jobs.show_job.side_effect = lambda job_id, full_details=False: {
         "j1": {"id": "j1", "state": "ok", "outputs": {"out1": {"id": "o1", "src": "hda"}}},
         "j2": {"id": "j2", "state": "running", "outputs": {"out1": {"id": "o2", "src": "hda"}}},
@@ -192,7 +193,7 @@ def _fake_gi():
 
 
 def _service(gi, store=None, user="alice"):
-    client = SimpleNamespace(gi_client=gi, galaxy_url="https://galaxy.example.org")
+    client = SimpleNamespace(gi_client=gi, galaxy_url="https://galaxy.example.org", user_api_key="user-key")
     return GalaxyRuns(client, user, store or MemoryStore(), cache=None)
 
 
@@ -313,6 +314,7 @@ def _client(svc):
 
     app = FastAPI()
     app.include_router(routes.router, prefix="/v1/galaxy")
+    app.include_router(routes.datasets_router, prefix="/v1/datasets")
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.dependency_overrides[routes.galaxy_runs] = lambda: svc
     return TestClient(app)
@@ -331,3 +333,166 @@ def test_invalid_body_is_400_and_a_repeat_is_200():
     assert client.get("/v1/galaxy/runs/run_missing").status_code == 404
     listed = client.get("/v1/galaxy/runs", params={"thread_id": "t1"}).json()
     assert [r["id"] for r in listed["items"]] == [first.json()["id"]] and listed["next_cursor"] is None
+
+
+# ---------------------------------------------------------------- 401/403 and file readiness
+
+async def test_galaxy_403_is_not_found_and_401_stays_a_token_problem():
+    gi = _fake_gi()
+    svc = _service(gi)
+    gi.tools.build.side_effect = GalaxyConnectionError("no", body='{"err_msg": "denied"}', status_code=403)
+    with pytest.raises(GalaxyRunsError) as e:
+        await svc.describe("t1", TARGET)
+    assert e.value.status_code == 404
+    gi.tools.build.side_effect = GalaxyConnectionError("no", body='{"err_msg": "bad key"}', status_code=401)
+    with pytest.raises(GalaxyRunsError) as e:
+        await svc.describe("t1", TARGET)
+    assert e.value.status_code == 401
+
+
+@pytest.mark.parametrize("state,expected", [("queued", "Still uploading"), ("running", "Still uploading"),
+                                            ("error", "Upload failed"), ("ok", None), ("deferred", None)])
+async def test_validate_says_still_uploading_until_the_file_is_ready(state, expected):
+    gi = _fake_gi()
+    gi.datasets.show_dataset.return_value = {"id": "f2db", "state": state}
+    result = await _service(gi).validate("t1", TARGET, INPUTS_HDA, {})
+    assert result["errors"].get("single_paired|in1") == expected
+
+
+INPUTS_HDA = {"single_paired|single_paired_selector": "single", "single_paired|in1": {"src": "hda", "id": "f2db"}}
+
+
+# ---------------------------------------------------------------- /v1/datasets
+
+import httpx  # noqa: E402
+
+from app.galaxy_runs import datasets  # noqa: E402
+
+
+def _multipart(fields_before, file_bytes, fields_after=(), boundary="XyZ"):
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+             for k, v in fields_before]
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="reads_R1.fastq.gz"\r\n'
+                 f'Content-Type: application/gzip\r\n\r\n'.encode() + file_bytes + b"\r\n")
+    parts += [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+              for k, v in fields_after]
+    return b"".join(parts) + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
+
+
+async def _chunks(body, size=7):
+    for i in range(0, len(body), size):
+        yield body[i:i + size]
+
+
+def _galaxy_fetch(seen):
+    async def handler(request: httpx.Request):
+        seen["url"] = str(request.url)
+        seen["headers"] = request.headers
+        seen["body"] = await request.aread()
+        return httpx.Response(200, json={"outputs": [{"id": "ds1", "name": "reads_R1.fastq.gz", "file_ext": "auto",
+                                                     "state": "queued", "create_time": "2026-10-09T10:02:00.123"}],
+                                         "jobs": [{"id": "j9"}]})
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_upload_streams_the_file_into_the_threads_history():
+    gi = _fake_gi()
+    svc = _service(gi)
+    seen = {}
+    payload = b"@r1\nACGT\n+\nFFFF\n" * 50
+    body, ctype = _multipart([("thread_id", "t1")], payload, [("format", "fastqsanger.gz")])
+    dataset = await datasets.upload(svc, ctype, str(len(body)), _chunks(body), http=_galaxy_fetch(seen))
+
+    assert dataset == {"id": "ds1", "name": "reads_R1.fastq.gz", "format": "auto", "size": len(payload),
+                       "state": "queued", "history_id": "hist1", "created_at": "2026-10-09T10:02:00Z"}
+    assert seen["url"] == "https://galaxy.example.org/api/tools/fetch"
+    assert seen["headers"]["x-api-key"] == "user-key"
+    sent = seen["body"]
+    assert b'name="files_0|file_data"; filename="reads_R1.fastq.gz"' in sent
+    assert payload in sent
+    assert b'name="history_id"\r\n\r\nhist1' in sent
+    # format arrived after the file and still reaches Galaxy
+    assert b'"ext": "fastqsanger.gz"' in sent
+
+
+async def test_upload_needs_thread_id_first_a_file_and_stays_under_the_cap(monkeypatch):
+    svc = _service(_fake_gi())
+    body, ctype = _multipart([], b"data", [("thread_id", "t1")])
+    with pytest.raises(GalaxyRunsError) as e:
+        await datasets.upload(svc, ctype, None, _chunks(body), http=_galaxy_fetch({}))
+    assert e.value.status_code == 400
+
+    body = b'--XyZ\r\nContent-Disposition: form-data; name="thread_id"\r\n\r\nt1\r\n--XyZ--\r\n'
+    with pytest.raises(GalaxyRunsError) as e:
+        await datasets.upload(svc, "multipart/form-data; boundary=XyZ", None, _chunks(body), http=_galaxy_fetch({}))
+    assert e.value.status_code == 400
+
+    monkeypatch.setattr(datasets, "UPLOAD_MAX_BYTES", 100)
+    body, ctype = _multipart([("thread_id", "t1")], b"x" * 500)
+    with pytest.raises(GalaxyRunsError) as e:
+        await datasets.upload(svc, ctype, None, _chunks(body), http=_galaxy_fetch({}))
+    assert e.value.status_code == 413
+    with pytest.raises(GalaxyRunsError) as e:  # refused before reading when Content-Length says so
+        await datasets.upload(svc, ctype, str(2_000_000), _chunks(body), http=_galaxy_fetch({}))
+    assert e.value.status_code == 413
+
+
+def _galaxy_display(seen, status=206, body=b"ACGT"):
+    async def handler(request: httpx.Request):
+        seen["url"] = str(request.url)
+        seen["range"] = request.headers.get("range")
+        headers = {"content-type": "application/octet-stream", "content-length": str(len(body))}
+        if status == 206:
+            headers["content-range"] = f"bytes 0-{len(body) - 1}/1000"
+        return httpx.Response(status, headers=headers, content=_chunks(body, 2))  # streamed, as Galaxy does
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def _read(response):
+    return b"".join([chunk async for chunk in response.body_iterator])
+
+
+async def test_download_streams_with_range_and_names_the_file():
+    gi = _fake_gi()
+    svc = _service(gi)
+    seen = {}
+    response = await datasets.download(svc, "f2db", "bytes=0-3", None, http=_galaxy_display(seen))
+    assert response.status_code == 206
+    assert await _read(response) == b"ACGT"
+    assert seen["range"] == "bytes=0-3"
+    assert seen["url"] == "https://galaxy.example.org/api/datasets/f2db/display?to_ext=fastqsanger.gz"
+    assert response.headers["content-range"] == "bytes 0-3/1000"
+    assert response.headers["content-disposition"].startswith('attachment; filename="reads_R1.fastqsanger.gz"')
+
+
+async def test_download_index_files_and_errors():
+    gi = _fake_gi()
+    svc = _service(gi)
+    seen = {}
+    response = await datasets.download(svc, "f2db", None, "bam_index", http=_galaxy_display(seen, 200))
+    assert seen["url"].endswith("/api/datasets/f2db/metadata_file?metadata_file=bam_index")
+    assert 'filename="reads_R1.bai"' in response.headers["content-disposition"]
+    await _read(response)
+
+    with pytest.raises(GalaxyRunsError) as e:
+        await datasets.download(svc, "f2db", None, "../etc", http=_galaxy_display({}))
+    assert e.value.status_code == 400
+
+    gi.datasets.show_dataset.side_effect = GalaxyConnectionError("no", body="{}", status_code=403)
+    with pytest.raises(GalaxyRunsError) as e:
+        await datasets.download(svc, "other-users", None, None, http=_galaxy_display({}))
+    assert e.value.status_code == 404
+
+
+def test_upload_and_download_routes(monkeypatch):
+    seen = {}
+    client = _client(_service(_fake_gi()))
+    monkeypatch.setattr(datasets, "_default_http", _galaxy_fetch(seen))
+    up = client.post("/v1/datasets/upload", data={"thread_id": "t1", "format": "fastqsanger.gz"},
+                     files={"file": ("reads_R1.fastq.gz", b"@r1\nACGT\n+\nFFFF\n", "application/gzip")})
+    assert up.status_code == 201 and up.json()["id"] == "ds1" and up.json()["size"] == 16
+
+    monkeypatch.setattr(datasets, "_default_http", _galaxy_display({}))
+    down = client.get("/v1/datasets/f2db/download", headers={"Range": "bytes=0-3"})
+    assert down.status_code == 206 and down.content == b"ACGT"
+    assert client.get("/v1/datasets/f2db/download", params={"metadata_file": "BAD!"}).status_code == 400

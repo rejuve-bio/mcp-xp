@@ -186,12 +186,13 @@ app.add_exception_handler(Exception, generic_exception_handler)
 # Include the API router
 app.include_router(api_router, prefix="/api")
 app.include_router(galaxy_runs.router, prefix="/v1/galaxy", tags=["Galaxy runs"])
+app.include_router(galaxy_runs.datasets_router, prefix="/v1/datasets", tags=["Galaxy runs"])
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """/v1/galaxy answers an invalid body with 400, keeping 422 for inputs Galaxy rejects."""
-    if request.url.path.startswith("/v1/galaxy"):
+    """/v1 answers an invalid body with 400, keeping 422 for inputs Galaxy rejects."""
+    if request.url.path.startswith("/v1/"):
         return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
     return await request_validation_exception_handler(request, exc)
 

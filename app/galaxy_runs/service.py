@@ -24,6 +24,9 @@ CACHE_SECONDS = 5
 STDERR_LINES = 20
 SEARCH_LIMIT = 15
 REMOVED = "Removed in Galaxy"
+# Dataset states: usable now ("deferred" is fetched when a job needs it), failed, or still on the way.
+FILE_READY = {"ok", "deferred"}
+FILE_FAILED = {"error", "failed_metadata", "discarded"}
 WORKFLOW_INPUT_STEPS = {"data_input", "data_collection_input", "parameter_input"}
 PUBLIC_RUN_FIELDS = ("id", "thread_id", "proposal_id", "client_request_id", "target", "status", "galaxy_state",
                      "progress", "history_id", "outputs", "error", "created_at", "updated_at")
@@ -73,8 +76,13 @@ class GalaxyRuns:
                 raise _NotInGalaxy(message) from e
             if code in (400, 422):
                 raise GalaxyRunsError(422, message) from e
-            if code in (401, 403):
-                raise GalaxyRunsError(403, message) from e
+            # 401 and 403 mean only "missing or expired token" to the platform, which refreshes and
+            # then signs the user out. Galaxy rejecting the key the token carries is that case; Galaxy
+            # refusing one thing (another user's dataset or history) is "not found for this user".
+            if code == 401:
+                raise GalaxyRunsError(401, "Galaxy did not accept the user's key") from e
+            if code == 403:
+                raise GalaxyRunsError(404, "Not found for this user") from e
             log.error("Galaxy call failed (%s): %s", code, message)
             raise GalaxyRunsError(502, "Galaxy failed. Safe to retry.") from e
 
@@ -140,6 +148,7 @@ class GalaxyRuns:
             model = await self._tool_model(target, history_id, inputs=shape_inputs(inputs, types))
             errors.update(_flatten_errors(model.get("errors") or {}))
             errors.update(_missing_required_files(model, inputs))
+            await self._file_readiness(inputs, errors)
             return {"valid": not errors, "errors": errors}
         workflow = await self._workflow(target)
         errors = {}
@@ -150,7 +159,40 @@ class GalaxyRuns:
         for label, e in known.items():
             if not e["optional"] and inputs.get(label) in (None, "", [], {}):
                 errors[label] = "Required"
+        await self._file_readiness(inputs, errors)
         return {"valid": not errors, "errors": errors}
+
+    async def _file_readiness(self, inputs: Dict[str, Any], errors: Dict[str, str]) -> None:
+        """A file that is still uploading, or whose upload failed, can't run yet (uploads are Galaxy jobs)."""
+        for path, value in inputs.items():
+            if path in errors:
+                continue
+            for ref in (value if isinstance(value, list) else [value]):
+                if not (isinstance(ref, dict) and ref.get("src") in ("hda", "hdca") and ref.get("id")):
+                    continue
+                problem = await self._not_ready(ref)
+                if problem:
+                    errors[path] = problem
+                    break
+
+    async def _not_ready(self, ref: Dict[str, Any]) -> Optional[str]:
+        try:
+            if ref["src"] == "hda":
+                states = [(await self._call(self.gi.datasets.show_dataset, ref["id"])).get("state")]
+            else:
+                collection = await self._call(self.gi.dataset_collections.show_dataset_collection, ref["id"])
+                if collection.get("populated_state") not in (None, "ok"):
+                    return "Still uploading"
+                states = [(e.get("object") or {}).get("state") for e in collection.get("elements") or []]
+        except (_NotInGalaxy, GalaxyRunsError) as e:
+            if isinstance(e, GalaxyRunsError) and e.status_code != 404:
+                raise
+            return "No such file for this user"
+        if any(s in FILE_FAILED for s in states):
+            return "Upload failed"
+        if any(s not in FILE_READY for s in states):
+            return "Still uploading"
+        return None
 
     # ------------------------------------------------------------------ search / files
 
