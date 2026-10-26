@@ -157,6 +157,34 @@ class MongoStore:
             self.log.error(f"Failed to set key '{key}' after retries.")
             raise RuntimeError(f"Failed to store key '{key}'.") from exc
 
+    async def set_if_absent(self, collection_name: str, key: str, value: Any) -> bool:
+        """ Store the value only if the key does not exist yet. Returns True if this call stored it.
+        Atomic through the unique index on 'key', so concurrent callers cannot both win. """
+
+        await self._ensure_indexes(collection_name)
+
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Key must be a non-empty string.")
+
+        @retry(
+            stop=stop_after_attempt(self._max_retries),
+            wait=wait_fixed(self._retry_delay_seconds),
+            retry=retry_if_exception_type(errors.ConnectionFailure),
+            reraise=True,
+        )
+        async def insert():
+            try:
+                await self._db[collection_name].insert_one({"key": key, "value": value})
+                return True
+            except errors.DuplicateKeyError:
+                return False
+
+        try:
+            return await insert()
+        except errors.PyMongoError as exc:
+            self.log.error(f"Failed to insert key '{key}' after retries.")
+            raise RuntimeError(f"Failed to store key '{key}'.") from exc
+
     async def get(self, collection_name: str, key: str) -> Optional[Any]:
         """ Asynchronously retrieve a value by key with retry. Returns None if key does not exist. """
         

@@ -126,7 +126,10 @@ class CollectionNames(Enum):
     DELETED_INVOCATIONS = "DeletedInvocation"
     INVOCATION_STATES = "InvocationStates"
     INVOCATION_META = "InvocationMeta"
-    
+    GALAXY_THREAD_HISTORIES = "GalaxyThreadHistories"
+    GALAXY_RUNS = "GalaxyRuns"
+    GALAXY_RUN_REQUESTS = "GalaxyRunRequests"
+
 class IndexingResponses(Enum):
     PENDING_MESSAGE = "Data Indexing in progress."
     COMPLETE_MESSAGE = "Indexing Completed."

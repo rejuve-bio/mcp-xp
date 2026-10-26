@@ -28,6 +28,10 @@ from fastapi import (
     Response
     )
 from fastapi.openapi.utils import get_openapi
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.responses import JSONResponse
 from app.mcp_client.chatbot import ChatSession, initialize_session
 
 from app.utils import import_published_workflows
@@ -38,6 +42,7 @@ from app.api.middleware import (
     DomainCORSMiddleware
     )
 from app.api.api import api_router 
+from app.api.endpoints import galaxy_runs
 from app.api.socket_manager import ws_manager
 from app.enumerations import SocketMessageEvent
 from app.orchestration.invocation_cache import InvocationCache
@@ -180,6 +185,15 @@ app.add_exception_handler(Exception, generic_exception_handler)
 
 # Include the API router
 app.include_router(api_router, prefix="/api")
+app.include_router(galaxy_runs.router, prefix="/v1/galaxy", tags=["Galaxy runs"])
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """/v1/galaxy answers an invalid body with 400, keeping 422 for inputs Galaxy rejects."""
+    if request.url.path.startswith("/v1/galaxy"):
+        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
+    return await request_validation_exception_handler(request, exc)
 
 # Override FastAPI’s OpenAPI generator
 app.openapi = custom_openapi
