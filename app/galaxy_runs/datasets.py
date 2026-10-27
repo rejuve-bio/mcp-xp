@@ -203,6 +203,11 @@ async def download(runs: GalaxyRuns, dataset_id: str, range_header: Optional[str
         dataset = await runs._call(runs.gi.datasets.show_dataset, dataset_id)
     except _NotInGalaxy:
         raise GalaxyRunsError(404, "No such dataset for this user")
+    except GalaxyRunsError as e:
+        # Galaxy answers 400 "invalid id" for an id it can't decode: still just "no such dataset".
+        if e.status_code == 422:
+            raise GalaxyRunsError(404, "No such dataset for this user")
+        raise
 
     ext = dataset.get("extension") or dataset.get("file_ext") or "data"
     name = dataset.get("name") or dataset_id
@@ -211,7 +216,7 @@ async def download(runs: GalaxyRuns, dataset_id: str, range_header: Optional[str
         filename = f"{name}.{INDEX_SUFFIX.get(metadata_file, metadata_file)}"
     else:
         url = f"{runs.galaxy_url}/api/datasets/{quote(dataset_id)}/display?to_ext={quote(ext)}"
-        filename = name if name.endswith(f".{ext}") else f"{name}.{ext}"
+        filename = name  # the dataset's name, as the spec says
 
     headers = {"x-api-key": runs.client.user_api_key}
     if range_header:

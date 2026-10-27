@@ -462,7 +462,7 @@ async def test_download_streams_with_range_and_names_the_file():
     assert seen["range"] == "bytes=0-3"
     assert seen["url"] == "https://galaxy.example.org/api/datasets/f2db/display?to_ext=fastqsanger.gz"
     assert response.headers["content-range"] == "bytes 0-3/1000"
-    assert response.headers["content-disposition"].startswith('attachment; filename="reads_R1.fastqsanger.gz"')
+    assert response.headers["content-disposition"].startswith('attachment; filename="reads_R1"')
 
 
 async def test_download_index_files_and_errors():
@@ -478,10 +478,11 @@ async def test_download_index_files_and_errors():
         await datasets.download(svc, "f2db", None, "../etc", http=_galaxy_display({}))
     assert e.value.status_code == 400
 
-    gi.datasets.show_dataset.side_effect = GalaxyConnectionError("no", body="{}", status_code=403)
-    with pytest.raises(GalaxyRunsError) as e:
-        await datasets.download(svc, "other-users", None, None, http=_galaxy_display({}))
-    assert e.value.status_code == 404
+    for galaxy_code in (403, 400):  # another user's dataset; an id Galaxy can't decode
+        gi.datasets.show_dataset.side_effect = GalaxyConnectionError("no", body="{}", status_code=galaxy_code)
+        with pytest.raises(GalaxyRunsError) as e:
+            await datasets.download(svc, "other-users", None, None, http=_galaxy_display({}))
+        assert e.value.status_code == 404
 
 
 def test_upload_and_download_routes(monkeypatch):

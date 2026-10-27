@@ -185,7 +185,7 @@ class GalaxyRuns:
                     return "Still uploading"
                 states = [(e.get("object") or {}).get("state") for e in collection.get("elements") or []]
         except (_NotInGalaxy, GalaxyRunsError) as e:
-            if isinstance(e, GalaxyRunsError) and e.status_code != 404:
+            if isinstance(e, GalaxyRunsError) and e.status_code not in (404, 422):  # 422: an id Galaxy can't decode
                 raise
             return "No such file for this user"
         if any(s in FILE_FAILED for s in states):
