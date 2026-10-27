@@ -14,7 +14,8 @@ from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 
 from app.log_setup import configure_logging
-from app.bioblend_server.mcp_context import current_api_key_server
+from app.bioblend_server.mcp_context import current_api_key_server, current_chat_id_server
+from app.context import validate_chat_id
 
 configure_logging()
 
@@ -73,6 +74,9 @@ class JWTGalaxyKeyMiddleware(Middleware):
         apikey = await self._decrypt_api_token(galaxy_jwt_token)
 
         current_api_key_server.set(apikey)
+        current_chat_id_server.set(
+            validate_chat_id(headers.get("X-Chat-Id") or headers.get("x-chat-id"))
+        )
         self.log.info("Incoming request to MCP server validated.")
 
         return await call_next(context)

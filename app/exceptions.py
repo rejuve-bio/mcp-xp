@@ -1,5 +1,8 @@
 # app/exceptions.py
 from fastapi import HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi import status
 
@@ -82,3 +85,10 @@ async def generic_exception_handler(request: Request, exc: Exception):
             "detail": str(exc)
         }
     )
+
+
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """/v1 answers an invalid body with 400, keeping 422 for inputs Galaxy rejects."""
+    if request.url.path.startswith("/v1/"):
+        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
+    return await request_validation_exception_handler(request, exc)

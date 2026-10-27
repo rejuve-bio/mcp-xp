@@ -28,6 +28,8 @@ from fastapi import (
     Response
     )
 from fastapi.openapi.utils import get_openapi
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from app.mcp_client.chatbot import ChatSession, initialize_session
 
 from app.utils import import_published_workflows
@@ -38,6 +40,7 @@ from app.api.middleware import (
     DomainCORSMiddleware
     )
 from app.api.api import api_router 
+from app.api.endpoints import galaxy_runs
 from app.api.socket_manager import ws_manager
 from app.enumerations import SocketMessageEvent
 from app.orchestration.invocation_cache import InvocationCache
@@ -45,7 +48,8 @@ from app.orchestration.invocation_tasks import InvocationBackgroundTasks
 
 from app.exceptions import (
     http_exception_handler,
-    generic_exception_handler,  
+    generic_exception_handler,
+    validation_exception_handler,
     UnauthorizedException,
     InternalServerErrorException
     )
@@ -112,6 +116,16 @@ def custom_openapi():
 
     # Apply globally
     openapi_schema["security"] = [{"BearerAuth": []}]
+
+    # /v1 answers an invalid body with 400 (app.exceptions.validation_exception_handler), so FastAPI's automatic
+    # "422 Validation Error" would misdocument it; 422 there means only "Galaxy rejected the inputs".
+    for path, operations in openapi_schema["paths"].items():
+        if path.startswith("/v1/"):
+            for operation in operations.values():
+                ref = operation.get("responses", {}).get("422", {}).get("content", {}) \
+                    .get("application/json", {}).get("schema", {}).get("$ref", "")
+                if ref.endswith("/HTTPValidationError"):
+                    del operation["responses"]["422"]
 
     app.openapi_schema = openapi_schema
     return app.openapi_schema
@@ -180,6 +194,10 @@ app.add_exception_handler(Exception, generic_exception_handler)
 
 # Include the API router
 app.include_router(api_router, prefix="/api")
+app.include_router(galaxy_runs.router, prefix="/v1/galaxy", tags=["Galaxy runs"])
+app.include_router(galaxy_runs.datasets_router, prefix="/v1/datasets", tags=["Galaxy runs"])
+
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 # Override FastAPI’s OpenAPI generator
 app.openapi = custom_openapi
