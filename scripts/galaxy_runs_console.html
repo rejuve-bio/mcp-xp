@@ -172,8 +172,15 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
       </section>
       <section class="panel" aria-label="Thread files">
         <div class="head"><h2>Thread files</h2><button class="small" id="refreshFiles">Refresh</button></div>
-        <div class="body"><div id="files" class="files"><span class="muted">Connect to list the thread history's files.</span></div>
-          <p class="note">To test with your own data, upload files in Galaxy into the history named "Chat thread &lt;thread id&gt;". It is created the first time you describe a tool here.</p></div>
+        <div class="body">
+          <form class="row" id="uploadForm">
+            <div class="field"><label for="upFile">Upload a file into this thread</label><input id="upFile" type="file"></div>
+            <div class="field" style="flex:0 1 180px"><label for="upFormat">Format (optional)</label><input id="upFormat" placeholder="e.g. fastqsanger.gz" autocomplete="off"><small>Galaxy detects it when left empty.</small></div>
+            <button class="primary" type="submit">Upload</button>
+          </form>
+          <div id="upState"></div>
+          <div id="files" class="files"><span class="muted">Connect to list the thread history's files.</span></div>
+          <p class="note"><span class="mono">POST /v1/datasets/upload</span> streams the file into the thread's Galaxy history and answers at once with state <span class="mono">queued</span>; the list below shows it turning <span class="mono">ok</span>. Each file has Preview (a <span class="mono">Range</span> request, 206) and Download (<span class="mono">GET /v1/datasets/{id}/download</span>).</p></div>
       </section>
     </div>
   </div>
@@ -272,10 +279,79 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
     const r = await api("GET", `/v1/galaxy/threads/${enc(S.thread)}/files`);
     if (!r.ok) { $("files").innerHTML = `<div class="err">${esc(detail(r))}</div>`; return; }
     S.files = r.data.items;
-    $("files").innerHTML = S.files.length
-      ? S.files.map(f => `<span class="file">#${esc(f.hid)} ${esc(f.name)} <span class="fmt">${esc(f.src === "hdca" ? f.collection_type : f.format)} · ${esc(f.state)}</span></span>`).join("")
-      : '<span class="muted">The thread history has no visible files yet.</span>';
+    $("files").innerHTML = S.files.length ? "" : '<span class="muted">The thread history has no visible files yet.</span>';
+    S.files.forEach(f => $("files").appendChild(fileChip(f.id, `#${f.hid} ${f.name}`, `${f.src === "hdca" ? f.collection_type : f.format} · ${f.state}`, f.src === "hda" && f.state === "ok")));
+    if (S.files.some(f => f.state && !["ok", "error", "deferred"].includes(f.state))) setTimeout(loadFiles, 3000);
   }
+
+  // A file chip with Preview (Range request) and Download, for datasets that are ready.
+  function fileChip(id, name, meta, ready) {
+    const c = el(`<span class="file">${esc(name)} <span class="fmt">${esc(meta)}</span></span>`);
+    if (ready) {
+      const pv = el('<button class="small" type="button">Preview</button>');
+      pv.addEventListener("click", () => preview(id, name));
+      const dl = el('<button class="small" type="button">Download</button>');
+      dl.addEventListener("click", () => downloadFile(id, dl));
+      c.append(" ", pv, " ", dl);
+    }
+    return c;
+  }
+
+  async function preview(id, name) {
+    const started = performance.now();
+    let res, text = "";
+    try {
+      res = await fetch(`${S.base}/v1/datasets/${enc(id)}/download`, { headers: { Authorization: `Bearer ${S.token}`, Range: "bytes=0-2047" } });
+      text = await res.text();
+    } catch (e) { text = String(e); }
+    logEntry("GET", `/v1/datasets/${id}/download  (Range: bytes=0-2047)`, null, res ? res.status : 0,
+      { "content-range": res && res.headers.get("content-range"), "content-disposition": res && res.headers.get("content-disposition"), first_bytes: text.slice(0, 300) },
+      Math.round(performance.now() - started));
+    openDrawer(`<div class="dhead"><div><h2>${esc(name)}</h2><div class="mono muted">HTTP ${res ? res.status : "error"} · ${esc(res && res.headers.get("content-range") || "whole file")}</div></div><button data-close>Close</button></div>
+      <p class="note">The first 2 KB, fetched with <span class="mono">Range: bytes=0-2047</span>. A genome browser or table view reads a large file the same way, one region or page at a time.</p>
+      <pre class="mono" style="white-space:pre-wrap;margin:0;max-height:60vh;overflow:auto">${esc(text)}</pre>`);
+  }
+
+  async function downloadFile(id, button) {
+    button.disabled = true; button.textContent = "Downloading…";
+    try {
+      const res = await fetch(`${S.base}/v1/datasets/${enc(id)}/download`, { headers: { Authorization: `Bearer ${S.token}` } });
+      logEntry("GET", `/v1/datasets/${id}/download`, null, res.status, { "content-disposition": res.headers.get("content-disposition"), "content-length": res.headers.get("content-length") }, 0);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const cd = res.headers.get("content-disposition") || "";
+      const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="([^"]+)"/);
+      const url = URL.createObjectURL(await res.blob());
+      const a = el(`<a href="${url}" download="${esc(m ? decodeURIComponent(m[1]) : id)}">save</a>`);
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      button.textContent = "Downloaded";
+    } catch (e) {
+      button.textContent = `Failed: ${e.message}`;
+    }
+    setTimeout(() => { button.disabled = false; button.textContent = "Download"; }, 3000);
+  }
+
+  $("uploadForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const file = $("upFile").files[0];
+    if (!file || !S.token) { $("upState").innerHTML = '<p class="muted">Connect, then choose a file.</p>'; return; }
+    const form = new FormData();
+    form.append("thread_id", S.thread);  // before the file, as the route requires
+    form.append("file", file);
+    if ($("upFormat").value.trim()) form.append("format", $("upFormat").value.trim());
+    $("upState").innerHTML = `<p class="muted">Uploading ${esc(file.name)} (${file.size} bytes)…</p>`;
+    const started = performance.now();
+    let status = 0, data;
+    try {
+      const res = await fetch(`${S.base}/v1/datasets/upload`, { method: "POST", headers: { Authorization: `Bearer ${S.token}` }, body: form });
+      status = res.status; data = await res.json();
+    } catch (err) { data = { detail: String(err) }; }
+    logEntry("POST", "/v1/datasets/upload", { thread_id: S.thread, file: file.name, format: $("upFormat").value.trim() || undefined }, status, data, Math.round(performance.now() - started));
+    $("upState").innerHTML = status === 201
+      ? `<p class="okline">Uploaded: dataset <span class="mono">${esc(data.id)}</span>, ${esc(data.size)} bytes, state ${esc(data.state)}, format ${esc(data.format)}.</p>`
+      : `<div class="err">${esc(status)} · ${esc(JSON.stringify(data.detail ?? data))}</div>`;
+    loadFiles();
+  });
   $("refreshFiles").addEventListener("click", loadFiles);
 
   // ---------------------------------------------------------------- 1. search
@@ -487,7 +563,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
       else note("The card for this run is not in this console session, so its request can't be resent.");
     });
     m.appendChild(c);
-    if (run.outputs && run.outputs.length) m.appendChild(el(`<div class="files">${run.outputs.map(o => `<span class="file">${esc(o.name)} <span class="fmt">${esc(o.format)}</span></span>`).join("")}</div>`));
+    if (run.outputs && run.outputs.length) {
+      const outs = el('<div class="files"></div>');
+      run.outputs.forEach(o => outs.appendChild(fileChip(o.id, o.name, o.format, true)));
+      m.appendChild(outs);
+    }
   }
 
   // ---------------------------------------------------------------- live status: poll while a run is queued or running

@@ -310,7 +310,7 @@ def _client(svc):
     from fastapi.exceptions import RequestValidationError
     from fastapi.testclient import TestClient
     from app.api.endpoints import galaxy_runs as routes
-    from app.main import validation_exception_handler
+    from app.exceptions import validation_exception_handler
 
     app = FastAPI()
     app.include_router(routes.router, prefix="/v1/galaxy")
