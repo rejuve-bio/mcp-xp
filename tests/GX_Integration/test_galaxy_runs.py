@@ -303,6 +303,66 @@ async def test_thread_files_without_a_history_is_empty():
     assert await svc.thread_files("t-new") == {"items": [], "next_cursor": None}
 
 
+async def test_thread_files_say_auto_while_galaxy_is_still_detecting_the_format():
+    gi = _fake_gi()
+    gi.histories.show_history.return_value = [
+        {"id": "d1", "hid": 1, "state": "queued", "extension": "data"},
+        {"id": "d2", "hid": 2, "state": "running", "extension": "auto"},
+        {"id": "d3", "hid": 3, "state": "ok", "extension": "fastqsanger"},
+        {"id": "d4", "hid": 4, "state": "ok", "extension": "data"},
+        {"id": "d5", "hid": 5, "state": "queued", "extension": "fastqsanger"},
+    ]
+    svc = _service(gi)
+    await svc.thread_history("t1")
+    files = await svc.thread_files("t1")
+    assert [f["format"] for f in files["items"]] == ["auto", "auto", "fastqsanger", "data", "fastqsanger"]
+
+
+# ---------------------------------------------------------------- workflow inputs by Galaxy label
+
+WORKFLOW_TARGET = {"type": "workflow", "id": "wf1"}
+
+
+def _workflow(labelled=True):
+    """Galaxy 26.1 show_workflow: steps carry no label; labels are in the top-level inputs map."""
+    return {
+        "id": "wf1", "name": "QC", "version": 1,
+        "inputs": {"0": {"label": "reads" if labelled else "Input dataset", "value": "", "uuid": "u0"}},
+        "steps": {"0": {"id": 0, "type": "data_input", "annotation": "", "tool_inputs": {"optional": False}},
+                  "1": {"id": 1, "type": "tool", "tool_inputs": {}}},
+    }
+
+
+async def test_workflow_describe_names_inputs_by_their_galaxy_label():
+    gi = _fake_gi()
+    gi.workflows.show_workflow.return_value = _workflow()
+    described = await _service(gi).describe("t1", WORKFLOW_TARGET)
+    assert [(e["path"], e["label"]) for e in described["inputs"]] == [("reads", "reads")]
+
+
+async def test_workflow_validate_accepts_the_label_runs_accept():
+    gi = _fake_gi()
+    gi.workflows.show_workflow.return_value = _workflow()
+    svc = _service(gi)
+    ok = await svc.validate("t1", WORKFLOW_TARGET, {"reads": {"src": "hda", "id": "f2db"}}, {})
+    assert ok == {"valid": True, "errors": {}}
+    old = await svc.validate("t1", WORKFLOW_TARGET, {"Input 0": {"src": "hda", "id": "f2db"}}, {})
+    assert old["errors"] == {"Input 0": "Unknown input", "reads": "Required"}
+
+
+async def test_unlabelled_workflow_input_keeps_a_stable_fallback_name():
+    gi = _fake_gi()
+    workflow = _workflow()
+    workflow["inputs"] = {}
+    gi.workflows.show_workflow.return_value = workflow
+    svc = _service(gi)
+    first = await svc.describe("t1", WORKFLOW_TARGET)
+    again = await svc.describe("t1", WORKFLOW_TARGET)
+    assert [e["path"] for e in first["inputs"]] == [e["path"] for e in again["inputs"]] == ["Input 0"]
+    result = await svc.validate("t1", WORKFLOW_TARGET, {"Input 0": {"src": "hda", "id": "f2db"}}, {})
+    assert result["valid"] is True
+
+
 # ---------------------------------------------------------------- routes
 
 def _client(svc):

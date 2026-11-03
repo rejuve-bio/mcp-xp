@@ -27,6 +27,8 @@ REMOVED = "Removed in Galaxy"
 # Dataset states: usable now ("deferred" is fetched when a job needs it), failed, or still on the way.
 FILE_READY = {"ok", "deferred"}
 FILE_FAILED = {"error", "failed_metadata", "discarded"}
+# Extensions Galaxy shows while it is still detecting an uploaded file's format.
+FORMAT_PLACEHOLDERS = {"data", "auto"}
 WORKFLOW_INPUT_STEPS = {"data_input", "data_collection_input", "parameter_input"}
 PUBLIC_RUN_FIELDS = ("id", "thread_id", "proposal_id", "client_request_id", "target", "status", "galaxy_state",
                      "progress", "history_id", "outputs", "error", "created_at", "updated_at")
@@ -234,7 +236,8 @@ class GalaxyRuns:
             if collection:
                 item["collection_type"] = c.get("collection_type")
             else:
-                item["format"] = c.get("extension")
+                detecting = item["state"] not in FILE_READY | FILE_FAILED and c.get("extension") in FORMAT_PLACEHOLDERS
+                item["format"] = "auto" if detecting else c.get("extension")
             items.append(item)
         return {"items": items, "next_cursor": None}
 
@@ -554,14 +557,19 @@ def _matches_when(value: Any, expected: Any) -> bool:
 
 
 def _workflow_inputs(workflow: Dict[str, Any], files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """A workflow's inputs by label, with the thread's matching files for file inputs."""
+    """A workflow's inputs by label, with the thread's matching files for file inputs.
+
+    Galaxy 26.1 steps carry no label: it is in the top-level inputs map, keyed by step index. That label is the
+    name runs invoke with (inputs_by="name"), so describe and validate use it too.
+    """
+    labels = {str(k): (v or {}).get("label") for k, v in (workflow.get("inputs") or {}).items()}
     entries = []
-    for step in sorted((workflow.get("steps") or {}).values(), key=lambda s: s.get("id", 0)):
+    for index, step in sorted((workflow.get("steps") or {}).items(), key=lambda kv: int(kv[0])):
         kind = step.get("type")
         if kind not in WORKFLOW_INPUT_STEPS:
             continue
         tool_inputs = step.get("tool_inputs") or {}
-        label = step.get("label") or (step.get("annotation") or f"Input {step.get('id')}")
+        label = labels.get(str(index)) or step.get("label") or f"Input {index}"
         entry: Dict[str, Any] = {"path": label, "label": label, "optional": bool(tool_inputs.get("optional", False))}
         if kind == "parameter_input":
             entry["type"] = tool_inputs.get("parameter_type", "text")
