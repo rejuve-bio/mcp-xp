@@ -29,7 +29,7 @@ from app.exceptions import (
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
 from app.GX_integration.invocations.data_manager import InvocationDataManager
 from app.GX_integration.invocations.tracker import InvocationTracker
-from app.GX_integration.invocations.utils import generate_request_hash, log_task_error
+from app.GX_integration.invocations.utils import generate_request_hash, log_task_error, resolve_galaxy_invocation_state
 
 class InvocationService:
     """High-level invocation operations - orchestrates the main workflows"""
@@ -371,14 +371,11 @@ class InvocationService:
             inputs_formatted = await self.inv_data_manager.structure_inputs(inv=invocation_details, workflow_manager=workflow_manager)
             
             # Compute preliminary state (without full check)
-            state = invocation_details.get("state")
-            if state in ["cancelled", "failed"]:
-                inv_state = InvocationStates.FAILED.value
-            elif state in ["requires_materialization", "ready", "new", "scheduled"]:
-                inv_state = InvocationStates.PENDING.value
-            else:
-                self.log.warning(f"Unknown invocation state: {state}")
-                inv_state = InvocationStates.FAILED.value
+            inv_state = await resolve_galaxy_invocation_state(
+                raw_state = invocation_details.get("state"),
+                invocation_id = invocation_id,
+                gi = workflow_manager.gi_object.gi
+            )
             
             # If pending-like, trigger background tracking if not already
             tracking_key = f"tracking:{username}:{invocation_id}"
