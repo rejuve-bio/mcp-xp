@@ -24,6 +24,7 @@ CACHE_SECONDS = 5
 STDERR_LINES = 20
 SEARCH_LIMIT = 15
 REMOVED = "Removed in Galaxy"
+NOT_YOURS = "No such file for this user"
 # Dataset states: usable now ("deferred" is fetched when a job needs it), failed, or still on the way.
 FILE_READY = {"ok", "deferred"}
 FILE_FAILED = {"error", "failed_metadata", "discarded"}
@@ -62,6 +63,7 @@ class GalaxyRuns:
         self.username = username
         self.store = store
         self.cache = cache  # redis.asyncio client, or None
+        self._history_owners: Dict[str, Optional[str]] = {}  # history id -> owner's username, for this request
 
     # ------------------------------------------------------------------ Galaxy calls
 
@@ -164,35 +166,70 @@ class GalaxyRuns:
 
     async def _file_readiness(self, inputs: Dict[str, Any], errors: Dict[str, str]) -> None:
         """A file that is still uploading, or whose upload failed, can't run yet (uploads are Galaxy jobs)."""
-        for path, value in inputs.items():
+        for path, ref in _file_refs(inputs):
             if path in errors:
                 continue
-            for ref in (value if isinstance(value, list) else [value]):
-                if not (isinstance(ref, dict) and ref.get("src") in ("hda", "hdca") and ref.get("id")):
-                    continue
-                problem = await self._not_ready(ref)
-                if problem:
-                    errors[path] = problem
-                    break
+            problem = await self._not_ready(ref)
+            if problem:
+                errors[path] = problem
 
     async def _not_ready(self, ref: Dict[str, Any]) -> Optional[str]:
-        try:
-            if ref["src"] == "hda":
-                states = [(await self._call(self.gi.datasets.show_dataset, ref["id"])).get("state")]
-            else:
-                collection = await self._call(self.gi.dataset_collections.show_dataset_collection, ref["id"])
-                if collection.get("populated_state") not in (None, "ok"):
-                    return "Still uploading"
-                states = [(e.get("object") or {}).get("state") for e in collection.get("elements") or []]
-        except (_NotInGalaxy, GalaxyRunsError) as e:
-            if isinstance(e, GalaxyRunsError) and e.status_code not in (404, 422):  # 422: an id Galaxy can't decode
-                raise
-            return "No such file for this user"
+        item = await self.own_file(ref)
+        if item is None:
+            return NOT_YOURS
+        if ref["src"] == "hda":
+            states = [item.get("state")]
+        else:
+            if item.get("populated_state") not in (None, "ok"):
+                return "Still uploading"
+            states = [(e.get("object") or {}).get("state") for e in item.get("elements") or []]
         if any(s in FILE_FAILED for s in states):
             return "Upload failed"
         if any(s not in FILE_READY for s in states):
             return "Still uploading"
         return None
+
+    # ------------------------------------------------------------------ whose files
+
+    async def own_file(self, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The dataset (src hda) or collection (hdca) a reference names, or None unless it is in one of the
+        caller's own histories.
+
+        Galaxy shows any dataset to anyone who has its id unless the owner made it private, so Galaxy
+        answering is not enough: the history it is in must belong to the caller.
+        """
+        try:
+            if ref["src"] == "hda":
+                item = await self._call(self.gi.datasets.show_dataset, ref["id"])
+            else:
+                item = await self._call(self.gi.dataset_collections.show_dataset_collection, ref["id"])
+        except (_NotInGalaxy, GalaxyRunsError) as e:
+            if isinstance(e, GalaxyRunsError) and e.status_code not in (404, 422):  # 422: an id Galaxy can't decode
+                raise
+            return None
+        return item if await self.owns_history(item.get("history_id")) else None
+
+    async def owns_history(self, history_id: Optional[str]) -> bool:
+        if not history_id:
+            return False
+        if history_id not in self._history_owners:
+            try:
+                owner = (await self._call(self.gi.histories.show_history, history_id)).get("username")
+            except (_NotInGalaxy, GalaxyRunsError) as e:
+                if isinstance(e, GalaxyRunsError) and e.status_code not in (404, 422):
+                    raise
+                owner = None
+            self._history_owners[history_id] = owner
+        return self._history_owners[history_id] == self.username
+
+    async def _refuse_others_files(self, inputs: Dict[str, Any]) -> None:
+        """422, per path, for any file that isn't the caller's, before Galaxy is asked to use it."""
+        errors: Dict[str, str] = {}
+        for path, ref in _file_refs(inputs):
+            if path not in errors and await self.own_file(ref) is None:
+                errors[path] = NOT_YOURS
+        if errors:
+            raise GalaxyRunsError(422, errors)
 
     # ------------------------------------------------------------------ search / files
 
@@ -247,6 +284,7 @@ class GalaxyRuns:
         if not await self.store.claim_request(self.username, client_request_id, run_id):
             return await self._repeat(client_request_id), True
         try:
+            await self._refuse_others_files(inputs)
             history_id = await self.thread_history(thread_id)
             if target["type"] == "tool":
                 started = await self._start_tool(target, history_id, inputs)
@@ -452,6 +490,7 @@ class GalaxyRuns:
 
     async def link(self, thread_id: str, proposal_id: str, target: Dict[str, Any], inputs: Dict[str, Any],
                    parameters: Dict[str, Any]) -> Dict[str, Any]:
+        await self._refuse_others_files(inputs)
         if target["type"] == "workflow":
             payload = {"workflow_id": target["id"], "workflow_target_type": "stored_workflow",
                        "request_state": inputs, "public": False}
@@ -518,6 +557,21 @@ def _int_or_none(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _file_refs(inputs: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """(path, {src, id}) for each dataset or collection the inputs name, also inside lists and batch values."""
+    def walk(value: Any):
+        if isinstance(value, dict):
+            if value.get("src") in ("hda", "hdca") and value.get("id"):
+                yield value
+            else:
+                for v in value.values():
+                    yield from walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                yield from walk(v)
+    return [(path, ref) for path, value in inputs.items() for ref in walk(value)]
 
 
 def _flatten_errors(errors: Any, prefix: str = "") -> Dict[str, str]:

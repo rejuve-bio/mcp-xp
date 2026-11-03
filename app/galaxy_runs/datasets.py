@@ -208,6 +208,8 @@ async def download(runs: GalaxyRuns, dataset_id: str, range_header: Optional[str
         if e.status_code == 422:
             raise GalaxyRunsError(404, "No such dataset for this user")
         raise
+    if not await runs.owns_history(dataset.get("history_id")):
+        raise GalaxyRunsError(404, "No such dataset for this user")
 
     ext = dataset.get("extension") or dataset.get("file_ext") or "data"
     name = dataset.get("name") or dataset_id
