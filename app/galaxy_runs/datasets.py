@@ -46,6 +46,8 @@ class _Form:
         self.fields: Dict[str, str] = {}
         self.chunks: List[bytes] = []
         self.file_name: Optional[str] = None
+        # thread_id as it stood when the file part began; later fields can't supply it.
+        self.thread_id_before_file = ""
         self.file_started = self.file_done = self.finished = False
         self._headers: Dict[str, bytes] = {}
         self._field = b""
@@ -82,6 +84,7 @@ class _Form:
             if self._part != "file":
                 raise GalaxyRunsError(400, "The file part must be named 'file'")
             self.file_name = params[b"filename"].decode("utf-8", "replace") or "upload"
+            self.thread_id_before_file = (self.fields.get("thread_id") or "").strip()
             self.file_started = True
 
     def _data(self, data, start, end):
@@ -128,7 +131,7 @@ async def upload(runs: GalaxyRuns, content_type: Optional[str], content_length: 
     while not form.file_started:
         if not await read_more():
             raise GalaxyRunsError(400, "No file in the upload")
-    thread_id = (form.fields.get("thread_id") or "").strip()
+    thread_id = form.thread_id_before_file
     if not thread_id or len(thread_id) > 256:
         raise GalaxyRunsError(400, "thread_id must come before the file")
     history_id = await runs.thread_history(thread_id)
