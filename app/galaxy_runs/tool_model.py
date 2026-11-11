@@ -182,4 +182,4 @@ def shape_inputs(inputs: Dict[str, Any], types: Dict[str, Dict[str, Any]]) -> Di
 
 
 def _is_file(value: Any) -> bool:
-    return isinstance(value, dict) and value.get("src") in ("hda", "hdca", "ldda") and bool(value.get("id"))
+    return isinstance(value, dict) and value.get("src") in ("hda", "hdca") and bool(value.get("id"))
