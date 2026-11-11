@@ -2,7 +2,7 @@ from sys import path
 path.append(".")
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import DEFAULT, MagicMock
 from urllib.parse import unquote
 
 import pytest
@@ -323,15 +323,22 @@ async def test_thread_files_without_a_history_is_empty():
     assert await svc.thread_files("t-new") == {"items": [], "next_cursor": None}
 
 
+def _history_contents(gi, contents):
+    """show_history(contents=True) lists these; other show_history calls keep whatever the fake already does."""
+    previous = gi.histories.show_history.side_effect
+    gi.histories.show_history.side_effect = lambda history_id, **kw: (
+        contents if kw.get("contents") else previous(history_id, **kw) if previous else DEFAULT)
+    return gi
+
+
 async def test_thread_files_say_auto_while_galaxy_is_still_detecting_the_format():
-    gi = _fake_gi()
-    gi.histories.show_history.return_value = [
+    gi = _history_contents(_fake_gi(), [
         {"id": "d1", "hid": 1, "state": "queued", "extension": "data"},
         {"id": "d2", "hid": 2, "state": "running", "extension": "auto"},
         {"id": "d3", "hid": 3, "state": "ok", "extension": "fastqsanger"},
         {"id": "d4", "hid": 4, "state": "ok", "extension": "data"},
         {"id": "d5", "hid": 5, "state": "queued", "extension": "fastqsanger"},
-    ]
+    ])
     svc = _service(gi)
     await svc.thread_history("t1")
     files = await svc.thread_files("t1")
@@ -343,44 +350,53 @@ async def test_thread_files_say_auto_while_galaxy_is_still_detecting_the_format(
 WORKFLOW_TARGET = {"type": "workflow", "id": "wf1"}
 
 
-def _workflow(labelled=True):
-    """Galaxy 26.1 show_workflow: steps carry no label; labels are in the top-level inputs map."""
-    return {
-        "id": "wf1", "name": "QC", "version": 1,
-        "inputs": {"0": {"label": "reads" if labelled else "Input dataset", "value": "", "uuid": "u0"}},
-        "steps": {"0": {"id": 0, "type": "data_input", "annotation": "", "tool_inputs": {"optional": False}},
-                  "1": {"id": 1, "type": "tool", "tool_inputs": {}}},
-    }
+def _workflow(*labels, formats=None):
+    """Galaxy 26.1 show_workflow: steps carry no label; labels are in the top-level inputs map.
+
+    Galaxy fills an unlabelled data input's label with "Input Dataset"."""
+    labels = labels or ("reads",)
+    steps = {str(i): {"id": i, "type": "data_input", "annotation": "",
+                      "tool_inputs": {"optional": False, "format": formats or []}} for i in range(len(labels))}
+    steps[str(len(labels))] = {"id": len(labels), "type": "tool", "tool_inputs": {}}
+    return {"id": "wf1", "name": "QC", "version": 1, "steps": steps,
+            "inputs": {str(i): {"label": label, "value": "", "uuid": f"u{i}"} for i, label in enumerate(labels)}}
+
+
+def _workflow_gi(workflow, contents=()):
+    gi = _history_contents(_fake_gi(), list(contents))
+    gi.workflows.show_workflow.return_value = workflow
+    return gi
 
 
 async def test_workflow_describe_names_inputs_by_their_galaxy_label():
-    gi = _fake_gi()
-    gi.workflows.show_workflow.return_value = _workflow()
-    described = await _service(gi).describe("t1", WORKFLOW_TARGET)
+    described = await _service(_workflow_gi(_workflow())).describe("t1", WORKFLOW_TARGET)
     assert [(e["path"], e["label"]) for e in described["inputs"]] == [("reads", "reads")]
 
 
 async def test_workflow_validate_accepts_the_label_runs_accept():
-    gi = _fake_gi()
-    gi.workflows.show_workflow.return_value = _workflow()
-    svc = _service(gi)
+    svc = _service(_workflow_gi(_workflow()))
     ok = await svc.validate("t1", WORKFLOW_TARGET, {"reads": {"src": "hda", "id": "f2db"}}, {})
     assert ok == {"valid": True, "errors": {}}
     old = await svc.validate("t1", WORKFLOW_TARGET, {"Input 0": {"src": "hda", "id": "f2db"}}, {})
     assert old["errors"] == {"Input 0": "Unknown input", "reads": "Required"}
 
 
-async def test_unlabelled_workflow_input_keeps_a_stable_fallback_name():
-    gi = _fake_gi()
-    workflow = _workflow()
-    workflow["inputs"] = {}
-    gi.workflows.show_workflow.return_value = workflow
-    svc = _service(gi)
+async def test_unlabelled_workflow_inputs_get_unique_stable_fallback_names():
+    svc = _service(_workflow_gi(_workflow("Input Dataset", "reads", "Input Dataset")))
     first = await svc.describe("t1", WORKFLOW_TARGET)
     again = await svc.describe("t1", WORKFLOW_TARGET)
-    assert [e["path"] for e in first["inputs"]] == [e["path"] for e in again["inputs"]] == ["Input 0"]
-    result = await svc.validate("t1", WORKFLOW_TARGET, {"Input 0": {"src": "hda", "id": "f2db"}}, {})
-    assert result["valid"] is True
+    assert [e["path"] for e in first["inputs"]] == [e["path"] for e in again["inputs"]] == ["Input 0", "reads",
+                                                                                           "Input 2"]
+    missing = await svc.validate("t1", WORKFLOW_TARGET, {"reads": {"src": "hda", "id": "f2db"},
+                                                         "Input 0": {"src": "hda", "id": "f2db"}}, {})
+    assert missing["errors"] == {"Input 2": "Required"}
+
+
+async def test_workflow_describe_matches_a_file_by_its_galaxy_extension_while_detecting():
+    gi = _workflow_gi(_workflow(formats=["data"]),
+                      [{"id": "d1", "hid": 1, "name": "reads", "state": "queued", "extension": "data"}])
+    described = await _service(gi).describe("t1", WORKFLOW_TARGET)
+    assert described["inputs"][0]["matches"] == [{"src": "hda", "id": "d1", "name": "reads", "hid": 1}]
 
 
 # ---------------------------------------------------------------- routes

@@ -29,6 +29,8 @@ FILE_READY = {"ok", "deferred"}
 FILE_FAILED = {"error", "failed_metadata", "discarded"}
 # Extensions Galaxy shows while it is still detecting an uploaded file's format.
 FORMAT_PLACEHOLDERS = {"data", "auto"}
+# Labels Galaxy fills in for an unlabelled workflow input; runs can't name the input by them.
+GENERIC_INPUT_LABELS = {"Input Dataset", "Input Dataset Collection", "Input Parameter"}
 WORKFLOW_INPUT_STEPS = {"data_input", "data_collection_input", "parameter_input"}
 PUBLIC_RUN_FIELDS = ("id", "thread_id", "proposal_id", "client_request_id", "target", "status", "galaxy_state",
                      "progress", "history_id", "outputs", "error", "created_at", "updated_at")
@@ -135,7 +137,7 @@ class GalaxyRuns:
                                "version": model.get("version"), "name": model.get("name")},
                     **described}
         workflow = await self._workflow(target)
-        files = await self.thread_files(thread_id)
+        files = await self.thread_files(thread_id, galaxy_formats=True)
         entries = _workflow_inputs(workflow, files["items"])
         return {"target": {"type": "workflow", "id": workflow["id"], "version": str(workflow.get("version", "")),
                            "name": workflow.get("name")},
@@ -222,7 +224,8 @@ class GalaxyRuns:
         return {"type": "tool", "id": t.get("id", tool_id), "version": t.get("version"),
                 "name": t.get("name"), "description": t.get("description")}
 
-    async def thread_files(self, thread_id: str) -> Dict[str, Any]:
+    async def thread_files(self, thread_id: str, galaxy_formats: bool = False) -> Dict[str, Any]:
+        """galaxy_formats keeps Galaxy's extension as is, instead of "auto" while Galaxy is still detecting it."""
         history_id = await self.thread_history(thread_id, create=False)
         if not history_id:
             return {"items": [], "next_cursor": None}
@@ -237,7 +240,7 @@ class GalaxyRuns:
                 item["collection_type"] = c.get("collection_type")
             else:
                 detecting = item["state"] not in FILE_READY | FILE_FAILED and c.get("extension") in FORMAT_PLACEHOLDERS
-                item["format"] = "auto" if detecting else c.get("extension")
+                item["format"] = "auto" if detecting and not galaxy_formats else c.get("extension")
             items.append(item)
         return {"items": items, "next_cursor": None}
 
@@ -560,7 +563,8 @@ def _workflow_inputs(workflow: Dict[str, Any], files: List[Dict[str, Any]]) -> L
     """A workflow's inputs by label, with the thread's matching files for file inputs.
 
     Galaxy 26.1 steps carry no label: it is in the top-level inputs map, keyed by step index. That label is the
-    name runs invoke with (inputs_by="name"), so describe and validate use it too.
+    name runs invoke with (inputs_by="name"), so describe and validate use it too. An unlabelled input (Galaxy's
+    generic label) is "Input <step index>", which is unique and stable but not yet a name runs accept.
     """
     labels = {str(k): (v or {}).get("label") for k, v in (workflow.get("inputs") or {}).items()}
     entries = []
@@ -569,7 +573,9 @@ def _workflow_inputs(workflow: Dict[str, Any], files: List[Dict[str, Any]]) -> L
         if kind not in WORKFLOW_INPUT_STEPS:
             continue
         tool_inputs = step.get("tool_inputs") or {}
-        label = labels.get(str(index)) or step.get("label") or f"Input {index}"
+        label = labels.get(str(index)) or step.get("label")
+        if not label or label in GENERIC_INPUT_LABELS:
+            label = f"Input {index}"
         entry: Dict[str, Any] = {"path": label, "label": label, "optional": bool(tool_inputs.get("optional", False))}
         if kind == "parameter_input":
             entry["type"] = tool_inputs.get("parameter_type", "text")
