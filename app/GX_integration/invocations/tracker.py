@@ -29,6 +29,7 @@ from app.enumerations import (
     )
 
 from app.GX_integration.invocations.data_manager import InvocationDataManager
+from app.GX_integration.invocations.utils import GALAXY_PENDING_INVOCATION_STATES, resolve_galaxy_invocation_state
 
 # invocation_tracker.py
 class InvocationTracker:
@@ -125,18 +126,8 @@ class InvocationTracker:
             self.log.debug("Getting stored invocation state.")
             return stored_state
 
-        if not raw_state:
-            self.log.warning("Invocation state is None or empty")
-            return InvocationStates.FAILED.value
-        
-        # Define state mappings
-        failed_states = {"cancelled", "failed", "cancelling"}
-        pending_states = {"requires_materialization", "ready", "new", "scheduled"}
-        
-        if raw_state in failed_states:
-            return InvocationStates.FAILED.value
-
-        elif raw_state in pending_states:
+        # Pending Galaxy states get a deeper look at their step jobs.
+        if raw_state in GALAXY_PENDING_INVOCATION_STATES:
             return await self.compute_deep_invocation_state(
                 workflow_manager = workflow_manager,
                 mongo_client = mongo_client,
@@ -144,9 +135,23 @@ class InvocationTracker:
                 username = username
             )
 
-        else:
-            self.log.warning(f"Unknown invocation state: {raw_state}")
-            return InvocationStates.FAILED.value
+        try:
+            inv_state = await resolve_galaxy_invocation_state(
+                raw_state = raw_state,
+                invocation_id = invocation_id,
+                gi = workflow_manager.gi_object.gi
+            )
+        except Exception as e:
+            # One failed lookup must not fail the whole invocation list.
+            self.log.error(f"Error resolving state for {invocation_id}: {e}")
+            return InvocationStates.PENDING.value
+
+        # Final states are stored so the jobs summary is fetched only once.
+        if inv_state != InvocationStates.PENDING.value:
+            asyncio.create_task(mongo_client.set_element(collection_name = CollectionNames.INVOCATION_STATES.value, key = username, field = invocation_id, value = inv_state))
+            asyncio.create_task(self.cache.set_invocation_state(username, invocation_id, inv_state))
+
+        return inv_state
         
     async def compute_deep_invocation_state(
         self,

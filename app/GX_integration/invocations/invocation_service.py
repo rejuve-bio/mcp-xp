@@ -29,7 +29,8 @@ from app.exceptions import (
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
 from app.GX_integration.invocations.data_manager import InvocationDataManager
 from app.GX_integration.invocations.tracker import InvocationTracker
-from app.GX_integration.invocations.utils import generate_request_hash, log_task_error
+from app.GX_integration.invocations.output_indexer import OutputIndexer
+from app.GX_integration.invocations.utils import generate_request_hash, log_task_error, resolve_galaxy_invocation_state
 
 class InvocationService:
     """High-level invocation operations - orchestrates the main workflows"""
@@ -371,14 +372,11 @@ class InvocationService:
             inputs_formatted = await self.inv_data_manager.structure_inputs(inv=invocation_details, workflow_manager=workflow_manager)
             
             # Compute preliminary state (without full check)
-            state = invocation_details.get("state")
-            if state in ["cancelled", "failed"]:
-                inv_state = InvocationStates.FAILED.value
-            elif state in ["requires_materialization", "ready", "new", "scheduled"]:
-                inv_state = InvocationStates.PENDING.value
-            else:
-                self.log.warning(f"Unknown invocation state: {state}")
-                inv_state = InvocationStates.FAILED.value
+            inv_state = await resolve_galaxy_invocation_state(
+                raw_state = invocation_details.get("state"),
+                invocation_id = invocation_id,
+                gi = workflow_manager.gi_object.gi
+            )
             
             # If pending-like, trigger background tracking if not already
             tracking_key = f"tracking:{username}:{invocation_id}"
@@ -424,8 +422,19 @@ class InvocationService:
                         )
                     background_task.add_done_callback(lambda t: log_task_error(t, task_name="track invocation"))
             else:
-                self.log.info(f"Loading invocation failure report for invocation {invocation_id}")
-                invocation_report = await self.inv_data_manager.report_invocation_failure(galaxy_client = galaxy_client, invocation_id = invocation_id)
+                if inv_state == InvocationStates.COMPLETE.value:
+                    # Completed with no failed job: structure its outputs as the background tracker does.
+                    outputs = {
+                        "output_datasets": [o["id"] for o in (invocation_details.get("outputs") or {}).values() if "id" in o],
+                        "collection_datasets": [o["id"] for o in (invocation_details.get("output_collections") or {}).values() if "id" in o]
+                    }
+                    workflow_result, invocation_report = await self.inv_data_manager.structure_outputs(
+                        _invocation = _invocation, outputs = outputs, workflow_manager = workflow_manager
+                    )
+                else:
+                    self.log.info(f"Loading invocation failure report for invocation {invocation_id}")
+                    invocation_report = await self.inv_data_manager.report_invocation_failure(galaxy_client = galaxy_client, invocation_id = invocation_id)
+                    workflow_result = []
                 invocation_result = {
                     "invocation_id" : invocation_details.get("id"),
                     "state" : inv_state,
@@ -433,7 +442,7 @@ class InvocationService:
                     "create_time" : invocation_details.get("create_time"),
                     "update_time" :invocation_details.get("update_time"),
                     "inputs" : inputs_formatted,
-                    "result" : [],
+                    "result" : workflow_result,
                     "workflow" : workflow_description.model_dump(),
                     "report" : invocation_report 
                 }
@@ -451,6 +460,11 @@ class InvocationService:
                         value = invocation_result
                         )
                     )
+
+                if inv_state == InvocationStates.COMPLETE.value:
+                    output_indexer = OutputIndexer(username = username, galaxy_client = galaxy_client, cache = self.cache, mongo_client = self.mongo_client, ws_manager = ws_manager)
+                    index_task = asyncio.create_task(output_indexer.index_datasets_and_register(invocation_result = invocation_result))
+                    index_task.add_done_callback(lambda t: log_task_error(t, task_name="index invocation outputs"))
             
             return invocation.InvocationResult(**invocation_result)
         except Exception as e:
