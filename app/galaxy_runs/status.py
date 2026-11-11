@@ -26,6 +26,9 @@ _JOB_STATUS = {
 _ACTIVE_PRIORITY = ["paused", "running", "queued", "waiting", "upload", "resubmitted", "new"]
 _FINAL_PRIORITY = ["error", "failed", "stopped", "stop", "deleted", "deleting", "deleted_new", "skipped", "ok"]
 
+# A final run is no longer read from Galaxy, so it keeps where Galaxy ends up rather than a passing state.
+_SETTLED = {"deleting": "deleted", "stop": "stopped", "cancelling": "cancelled"}
+
 
 def job_status(galaxy_state: Optional[str]) -> str:
     """UI status for one Galaxy job state. Unknown states count as queued."""
@@ -48,7 +51,7 @@ def tool_run_status(job_states: Iterable[str]) -> Tuple[str, str]:
     statuses = [job_status(s) for s in states]
     if all(is_final(s) for s in statuses):
         status = FAILED if FAILED in statuses else CANCELLED if CANCELLED in statuses else COMPLETED
-        return status, _pick(states, _FINAL_PRIORITY)
+        return status, _settled(_pick(states, _FINAL_PRIORITY))
     if any(s != QUEUED for s in statuses):
         return RUNNING, _pick([s for s in states if not is_final(job_status(s))], _ACTIVE_PRIORITY)
     return QUEUED, _pick(states, _ACTIVE_PRIORITY)
@@ -65,7 +68,7 @@ def invocation_run_status(invocation_state: Optional[str], job_state_counts: Map
     galaxy_state = "paused" if "paused" in present else state
 
     if state in ("cancelled", "cancelling"):
-        return CANCELLED, galaxy_state
+        return CANCELLED, _settled(state)
     if state == "failed":
         return FAILED, galaxy_state
     if state == "completed":
@@ -81,6 +84,10 @@ def no_going_back(previous: Optional[str], current: str) -> str:
     if previous and _ORDER.get(current, 0) < _ORDER.get(previous, 0):
         return previous
     return current
+
+
+def _settled(galaxy_state: str) -> str:
+    return _SETTLED.get(galaxy_state, galaxy_state)
 
 
 def _pick(states, priority):

@@ -91,6 +91,9 @@ def test_input_types_cover_repeat_blocks_and_batch_shaping():
     (["ok", "error", "running"], ("running", "running")),  # not final until every job is
     (["ok", "deleted"], ("cancelled", "deleted")),
     (["skipped"], ("completed", "skipped")),
+    (["deleting"], ("cancelled", "deleted")),  # a final run keeps where Galaxy ends up, not a transitional state
+    (["stop"], ("cancelled", "stopped")),
+    (["ok", "deleting", "running"], ("running", "running")),
 ])
 def test_tool_run_status(states, expected):
     assert st.tool_run_status(states) == expected
@@ -108,6 +111,10 @@ def test_tool_run_status(states, expected):
 ])
 def test_invocation_run_status(state, counts, expected):
     assert st.invocation_run_status(state, counts)[0] == expected
+
+
+def test_a_cancelling_workflow_settles_as_cancelled():
+    assert st.invocation_run_status("cancelling", {"paused": 1}) == ("cancelled", "cancelled")
 
 
 def test_paused_job_shows_as_paused():
@@ -260,6 +267,19 @@ async def test_a_job_galaxy_no_longer_has_ends_the_run_as_cancelled():
     removed = await svc.read_run(run["id"])
     assert removed["status"] == "cancelled"
     assert removed["error"] == {"step": None, "message": "Removed in Galaxy"}
+
+
+@pytest.mark.parametrize("job_state,settled", [("deleting", "deleted"), ("stop", "stopped")])
+async def test_a_run_stored_as_final_keeps_a_settled_galaxy_state(job_state, settled):
+    store = MemoryStore()
+    gi = _fake_gi()
+    svc = _service(gi, store)
+    run, _ = await svc.start_run("t1", "prop_8", "req-1", TARGET, INPUTS, {})
+    gi.jobs.show_job.side_effect = lambda job_id, full_details=False: {"id": job_id, "state": job_state, "outputs": {}}
+    first = await svc.read_run(run["id"])
+    assert (first["status"], first["galaxy_state"]) == ("cancelled", settled)
+    stored = await _service(_fake_gi(), store).read_run(run["id"])
+    assert (stored["status"], stored["galaxy_state"]) == ("cancelled", settled)
 
 
 async def test_another_users_run_is_not_found():
@@ -495,6 +515,28 @@ async def test_upload_needs_thread_id_first_a_file_and_stays_under_the_cap(monke
     with pytest.raises(GalaxyRunsError) as e:  # refused before reading when Content-Length says so
         await datasets.upload(svc, ctype, str(2_000_000), _chunks(body), http=_galaxy_fetch({}))
     assert e.value.status_code == 413
+
+
+@pytest.mark.parametrize("chunk_size", [1_000_000, 7], ids=["one-chunk", "many-chunks"])
+async def test_upload_rejects_thread_id_after_the_file_however_the_body_arrives(chunk_size):
+    svc = _service(_fake_gi())
+    seen = {}
+    body, ctype = _multipart([("format", "txt")], b"data", [("thread_id", "t1")])
+    with pytest.raises(GalaxyRunsError) as e:
+        await datasets.upload(svc, ctype, str(len(body)), _chunks(body, chunk_size), http=_galaxy_fetch(seen))
+    assert (e.value.status_code, e.value.detail) == (400, "thread_id must come before the file")
+    assert seen == {}  # nothing reached Galaxy
+
+
+@pytest.mark.parametrize("chunk_size", [1_000_000, 7], ids=["one-chunk", "many-chunks"])
+async def test_upload_takes_format_before_or_after_the_file(chunk_size):
+    for before, after in [([("thread_id", "t1"), ("format", "txt")], []), ([("thread_id", "t1")], [("format", "txt")])]:
+        seen = {}
+        body, ctype = _multipart(before, b"data", after)
+        dataset = await datasets.upload(_service(_fake_gi()), ctype, str(len(body)), _chunks(body, chunk_size),
+                                        http=_galaxy_fetch(seen))
+        assert dataset["id"] == "ds1"
+        assert b'"ext": "txt"' in seen["body"]
 
 
 def _galaxy_display(seen, status=206, body=b"ACGT"):
