@@ -3,6 +3,8 @@ from sys import path
 
 path.append(".")
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -155,3 +157,100 @@ async def test_get_invocation_result_pending_states(raw_state):
     )
 
     assert result.state == PENDING
+
+
+OUTPUT_DATASET = {"type": "dataset", "id": "ds1", "name": "out.txt", "visible": True, "data_type": "txt"}
+
+
+async def test_get_invocation_result_complete_carries_outputs_and_no_failure_report():
+    """A successful completed invocation gets its real outputs and is indexed, like the background tracker does."""
+    mongo = make_mongo()
+    service = InvocationService(cache=make_cache(), background_tasks=MagicMock(), mongo_client=mongo)
+    service.inv_data_manager.structure_inputs = AsyncMock(return_value={})
+    service.inv_data_manager.report_invocation_failure = AsyncMock(return_value="failure report")
+    service.inv_data_manager.structure_outputs = AsyncMock(return_value=([OUTPUT_DATASET], "### Invocation report"))
+    workflow_manager = make_workflow_manager("completed", {"ok": 2})
+    details = workflow_manager.gi_object.gi.invocations.show_invocation.return_value
+    details["outputs"] = {"out": {"id": "ds1", "src": "hda"}}
+    details["output_collections"] = {"col": {"id": "hdca1", "src": "hdca"}}
+
+    with patch("app.GX_integration.invocations.invocation_service.OutputIndexer") as indexer_cls:
+        indexer_cls.return_value.index_datasets_and_register = AsyncMock()
+        result = await service.get_invocation_result(
+            invocation_id=INVOCATION_ID,
+            username=USERNAME,
+            api_key="key",
+            galaxy_client=MagicMock(),
+            workflow_manager=workflow_manager,
+        )
+        await asyncio.sleep(0)  # let the indexing task run
+
+    assert result.state == COMPLETE
+    assert [r.id for r in result.result] == ["ds1"]
+    assert result.report == "### Invocation report"
+    service.inv_data_manager.report_invocation_failure.assert_not_called()
+    outputs = service.inv_data_manager.structure_outputs.await_args.kwargs["outputs"]
+    assert outputs == {"output_datasets": ["ds1"], "collection_datasets": ["hdca1"]}
+    stored = mongo.set.await_args.kwargs["value"]
+    assert stored["result"] == [OUTPUT_DATASET] and stored["report"] == "### Invocation report"
+    indexer_cls.return_value.index_datasets_and_register.assert_awaited_once()
+
+
+@pytest.mark.parametrize("job_counts, expected", [({"ok": 1}, COMPLETE), ({"error": 1}, FAILED)])
+async def test_map_invocation_state_stores_resolved_completed_state(job_counts, expected):
+    """The list path asks Galaxy for a completed invocation's jobs once, then serves the stored state."""
+    cache, mongo = make_cache(), make_mongo()
+    tracker = InvocationTracker(cache=cache, redis_client=MagicMock(), inv_data_manager=MagicMock())
+
+    state = await tracker.map_invocation_state(
+        username=USERNAME,
+        raw_state="completed",
+        invocation_id=INVOCATION_ID,
+        workflow_manager=make_workflow_manager("completed", job_counts),
+        mongo_client=mongo,
+    )
+    await asyncio.sleep(0)
+
+    assert state == expected
+    cache.set_invocation_state.assert_awaited_once_with(USERNAME, INVOCATION_ID, expected)
+    mongo.set_element.assert_awaited_once()
+    assert mongo.set_element.await_args.kwargs["value"] == expected
+
+
+async def test_map_invocation_state_degrades_to_pending_when_summary_fails():
+    """One failed jobs-summary call gives Pending for that invocation instead of failing the whole list."""
+    cache, mongo = make_cache(), make_mongo()
+    tracker = InvocationTracker(cache=cache, redis_client=MagicMock(), inv_data_manager=MagicMock())
+    workflow_manager = make_workflow_manager("completed", {})
+    workflow_manager.gi_object.gi.invocations.get_invocation_summary.side_effect = RuntimeError("galaxy down")
+
+    state = await tracker.map_invocation_state(
+        username=USERNAME,
+        raw_state="completed",
+        invocation_id=INVOCATION_ID,
+        workflow_manager=workflow_manager,
+        mongo_client=mongo,
+    )
+    await asyncio.sleep(0)
+
+    assert state == PENDING
+    cache.set_invocation_state.assert_not_called()
+    mongo.set_element.assert_not_called()
+
+
+async def test_map_invocation_state_does_not_store_unknown_state():
+    cache, mongo = make_cache(), make_mongo()
+    tracker = InvocationTracker(cache=cache, redis_client=MagicMock(), inv_data_manager=MagicMock())
+
+    state = await tracker.map_invocation_state(
+        username=USERNAME,
+        raw_state="bogus",
+        invocation_id=INVOCATION_ID,
+        workflow_manager=make_workflow_manager("bogus", {}),
+        mongo_client=mongo,
+    )
+    await asyncio.sleep(0)
+
+    assert state == PENDING
+    cache.set_invocation_state.assert_not_called()
+    mongo.set_element.assert_not_called()
