@@ -155,7 +155,7 @@ class GalaxyRuns:
             await self._file_readiness(inputs, errors)
             return {"valid": not errors, "errors": errors}
         workflow = await self._workflow(target)
-        errors = {}
+        errors = _label_clashes(workflow)
         known = {e["path"]: e for e in _workflow_inputs(workflow, [])}
         for label in inputs:
             if label not in known:
@@ -304,6 +304,9 @@ class GalaxyRuns:
                               parameters: Dict[str, Any]) -> Dict[str, Any]:
         workflow = await self._workflow(target)
         steps_total = sum(1 for s in (workflow.get("steps") or {}).values() if s.get("type") not in WORKFLOW_INPUT_STEPS)
+        clashes = _label_clashes(workflow)
+        if clashes:
+            raise GalaxyRunsError(422, clashes)
         # An unlabelled input has no name Galaxy knows, so its fallback path goes by step index.
         by_index = {path: index for index, _, path, labelled in _input_steps(workflow) if not labelled}
         inputs = {by_index.get(path, path): value for path, value in inputs.items()}
@@ -567,17 +570,30 @@ def _input_steps(workflow: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any], st
 
     Galaxy 26.1 steps carry no label: it is in the top-level inputs map, keyed by step index. A labelled input's
     path is that label, the name Galaxy invokes it by. An unlabelled input (Galaxy fills in a generic label) is
-    "Input <step index>": unique and stable, and runs send it to Galaxy by step index.
+    "Input <step index>" ("Input <step index> (unlabelled)" if a real label is already that): unique and stable,
+    and runs send it to Galaxy by step index.
     """
     labels = {str(k): (v or {}).get("label") for k, v in (workflow.get("inputs") or {}).items()}
+    steps = [(str(index), step, labels.get(str(index)) or step.get("label"))
+             for index, step in sorted((workflow.get("steps") or {}).items(), key=lambda kv: int(kv[0]))
+             if step.get("type") in WORKFLOW_INPUT_STEPS]
+    real = {label for _, _, label in steps if label and label not in GENERIC_INPUT_LABELS}
     found = []
-    for index, step in sorted((workflow.get("steps") or {}).items(), key=lambda kv: int(kv[0])):
-        if step.get("type") not in WORKFLOW_INPUT_STEPS:
-            continue
-        label = labels.get(str(index)) or step.get("label")
-        labelled = bool(label) and label not in GENERIC_INPUT_LABELS
-        found.append((str(index), step, label if labelled else f"Input {index}", labelled))
+    for index, step, label in steps:
+        if label in real:
+            found.append((index, step, label, True))
+        else:
+            fallback = f"Input {index}"
+            found.append((index, step, fallback if fallback not in real else f"{fallback} (unlabelled)", False))
     return found
+
+
+def _label_clashes(workflow: Dict[str, Any]) -> Dict[str, str]:
+    """Labels that are another input step's number: with inputs_by="step_index|name" Galaxy can't tell them apart."""
+    found = _input_steps(workflow)
+    indexes = {index for index, _, _, _ in found}
+    return {path: "Rename this input in Galaxy: its label is also a step number"
+            for index, _, path, labelled in found if labelled and path != index and path in indexes}
 
 
 def _workflow_inputs(workflow: Dict[str, Any], files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

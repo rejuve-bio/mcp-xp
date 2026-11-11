@@ -402,6 +402,40 @@ async def test_a_run_accepts_the_fallback_name_of_an_unlabelled_input():
     assert kwargs["inputs_by"] == "step_index|name"
 
 
+async def _invoked(workflow, inputs):
+    gi = _workflow_gi(workflow)
+    gi.workflows.invoke_workflow.return_value = {"id": "inv1"}
+    await _service(gi).start_run("t1", "prop_8", "req-1", WORKFLOW_TARGET, inputs, {})
+    return gi.workflows.invoke_workflow.call_args.kwargs["inputs"]
+
+
+async def test_labelled_workflow_inputs_run_by_their_names_unchanged():
+    reads, adapters = {"src": "hda", "id": "f2db"}, {"src": "hda", "id": "a1"}
+    assert await _invoked(_workflow("reads", "adapters"), {"reads": reads, "adapters": adapters}) == {
+        "reads": reads, "adapters": adapters}
+
+
+async def test_a_real_label_that_looks_like_a_fallback_name_stays_a_name():
+    workflow = _workflow("Input Dataset", "Input 0")
+    described = await _service(_workflow_gi(workflow)).describe("t1", WORKFLOW_TARGET)
+    assert [e["path"] for e in described["inputs"]] == ["Input 0 (unlabelled)", "Input 0"]
+    reads, adapters = {"src": "hda", "id": "f2db"}, {"src": "hda", "id": "a1"}
+    assert await _invoked(workflow, {"Input 0 (unlabelled)": reads, "Input 0": adapters}) == {
+        "0": reads, "Input 0": adapters}
+
+
+async def test_a_label_that_is_another_inputs_step_number_is_refused():
+    gi = _workflow_gi(_workflow("1", "reads"))
+    reads = {"src": "hda", "id": "f2db"}
+    svc = _service(gi)
+    result = await svc.validate("t1", WORKFLOW_TARGET, {"1": reads, "reads": reads}, {})
+    assert result["errors"] == {"1": "Rename this input in Galaxy: its label is also a step number"}
+    with pytest.raises(GalaxyRunsError) as e:
+        await svc.start_run("t1", "prop_8", "req-1", WORKFLOW_TARGET, {"1": reads, "reads": reads}, {})
+    assert e.value.status_code == 422 and e.value.detail == result["errors"]
+    gi.workflows.invoke_workflow.assert_not_called()
+
+
 async def test_workflow_describe_matches_a_file_by_its_galaxy_extension_while_detecting():
     gi = _workflow_gi(_workflow(formats=["data"]),
                       [{"id": "d1", "hid": 1, "name": "reads", "state": "queued", "extension": "data"}])
