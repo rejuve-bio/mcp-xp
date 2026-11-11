@@ -170,12 +170,12 @@ async def get_workflow_form(
     except Exception as e:
         raise InternalServerErrorException("Failed to build workflow form")
 
-# @router.post(
-#     "/{workflow_id}/histories/{history_id}/execute",
-#     response_model=workflow.WorkflowExecutionResponse,
-#     summary="Execute a Workflow",
-#     tags=["Workflows"]
-# )
+@router.post(
+    "/{workflow_id}/histories/{history_id}/execute",
+    response_model=workflow.WorkflowExecutionResponse,
+    summary="Execute a Workflow",
+    tags=["Workflows"]
+)
 async def execute_workflow(
     request: Request,
     dummy_input: str = Form(None, description="Dummy input to force form rendering the form input for the galaxy execution"), # Adding dummy form value to input request form.

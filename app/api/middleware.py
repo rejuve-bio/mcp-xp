@@ -18,7 +18,12 @@ from starlette.types import ASGIApp
 from starlette.status import HTTP_204_NO_CONTENT
 
 import jwt
-from app.context import current_api_key, current_user_email
+from app.context import (
+    current_api_key,
+    current_user_email,
+    current_chat_id,
+    validate_chat_id,
+)
 
 from app.exceptions import UnauthorizedException
 
@@ -83,6 +88,9 @@ class JWTGalaxyKeyMiddleware(BaseHTTPMiddleware):
             # set the context for downstream handlers
             current_api_key.set(apikey)
             current_user_email.set(payload.get("email"))
+            current_chat_id.set(
+                validate_chat_id(request.headers.get("X-Chat-Id") or request.headers.get("x-chat-id"))
+            )
             return await call_next(request)
         
         except UnauthorizedException as e:
@@ -368,7 +376,10 @@ class DomainCORSMiddleware(BaseHTTPMiddleware):
         self,
         app: ASGIApp,
         allow_methods: list[str] = ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers: list[str] = ["Authorization", "Content-Type", "X-Requested-With"],
+        # Range: partial reads of /v1/datasets downloads (previews, resumed downloads).
+        allow_headers: list[str] = ["Authorization", "Content-Type", "X-Requested-With", "Range"],
+        # Headers browser code may read: a download's name and the byte range it got.
+        expose_headers: list[str] = ["Content-Disposition", "Content-Range", "Content-Length", "Accept-Ranges"],
         max_age: int = 600,
         allow_schemes: list[str] = ["http", "https"],
         trust_proxy_headers: bool = False,  # Set True if behind reverse proxy
@@ -376,6 +387,7 @@ class DomainCORSMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.allow_methods = allow_methods
         self.allow_headers = allow_headers
+        self.expose_headers = expose_headers
         self.max_age = max_age
         self.allow_schemes = set(scheme.lower() for scheme in allow_schemes)
         self.trust_proxy_headers = trust_proxy_headers
@@ -469,6 +481,7 @@ class DomainCORSMiddleware(BaseHTTPMiddleware):
         """Add CORS headers to response."""
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Expose-Headers"] = ", ".join(self.expose_headers)
         
         # Append to existing Vary header if present
         existing_vary = response.headers.get("Vary", "")

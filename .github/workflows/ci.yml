@@ -3,12 +3,12 @@ name: Continuous Integration
 on:
   push:
     branches:
-      - main
+      - staging
       - "feat/**"
       - "fix/**"
   pull_request:
     branches:
-      - main
+      - staging
 
 jobs:
   lint-and-test:

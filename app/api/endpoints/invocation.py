@@ -84,6 +84,29 @@ async def list_invocations(
         raise  InternalServerErrorException("Failed to list invocations")
 
 @router.get(
+    "/by-chat/{chat_id}",
+    response_model=invocation.InvocationList,
+    summary="List invocations tagged with a given chat_id",
+    tags=["Invocation"],
+)
+async def list_invocations_by_chat(
+    chat_id: str = Path(..., description="Chat ID whose invocations to fetch"),
+):
+    """Reverse lookup: return every invocation tagged with `chat_id` for the
+    JWT-authenticated user. Cross-user scoping is enforced server-side."""
+    try:
+        api_key = current_api_key.get()
+        galaxy_client = GalaxyClient(api_key)
+        username = galaxy_client.whoami
+        return await invocation_service.list_invocations_by_chat(
+            username=username,
+            chat_id=chat_id,
+        )
+    except Exception as e:
+        logger.error(f"Failed to list invocations by chat_id: {e}")
+        raise InternalServerErrorException("Failed to list invocations by chat_id")
+
+@router.get(
     "/{invocation_id}/invocation_pdf",
     response_class = FileResponse,
     summary= "Get invocation pdf report",

@@ -1,119 +1,88 @@
-# Deploy workflows
+# Blue-green deployment
 
-Two Kubernetes deploy workflows, mirroring the pattern used by
-`hypothesis-generation-demo`:
+The repository deploys `mcp-xp` with two Kubernetes Deployments per
+environment:
 
-| Workflow | Trigger event | Target namespace |
-|---|---|---|
-| `cd-staging-deployment.yml` | `repository_dispatch` type `deploy-staging` | `mcp-xp-staging` (hetzner cluster) |
-| `cd-production-deployment.yml` | `repository_dispatch` type `deploy-production` | `mcp-xp-production` (app.rejuve.bio cluster) |
+- `mcp-app-blue`
+- `mcp-app-green`
 
-Both run on a **self-hosted runner** that has cluster network access
-and the `kubectl` binary available. Neither auto-deploys on push or
-merge — each requires an explicit `repository_dispatch` event.
+The existing `mcp-app` Service is the stable entry point. Its
+`app.kubernetes.io/slot` selector determines which color receives live traffic.
+`mcp-app-preview` selects the inactive color for inspection before promotion.
 
-## How each deploy fires
+## Delivery flow
 
-The workflow expects a `repository_dispatch` payload:
+1. A push to `staging` builds and pushes two images:
+   `rejuvebio/mcp-xp:sha-<commit>` and `rejuvebio/mcp-xp:staging`.
+2. The build workflow dispatches the immutable SHA tag to the staging workflow.
+3. The workflow reads the live Service selector to find the active color.
+4. It clones the active Deployment configuration to the inactive color, changing
+   only the name, slot labels, image, and deployment annotations. This preserves
+   the cluster's existing environment variables, secrets, volumes, probes, and
+   resource settings.
+5. It waits for the inactive Deployment and smoke-tests its `/` endpoint through
+   a direct `kubectl port-forward`.
+6. A successful candidate is retagged as
+   `rejuvebio/mcp-xp:staging-stable`.
+7. The live Service selector is changed to the validated color. The previous
+   color remains running for an immediate rollback.
+8. Production deployment is an explicit manual or `deploy-production` dispatch.
+   It resolves `rejuvebio/mcp-xp:staging-stable` to an immutable image digest,
+   deploys that digest to the inactive production color, validates it, and then
+   switches the production Service.
 
-```json
-{
-  "event_type": "deploy-staging",
-  "client_payload": { "image_tag": "sha-abc1234" }
-}
-```
+The Service selector change is the traffic switch; this is a true blue-green
+deployment rather than a normal rolling update with blue/green naming.
 
-`image_tag` defaults to `"staging"` (or `"production"`) if the payload
-is empty.
+## First-run migration
 
-Typical trigger paths:
+The first deployment bootstraps from the existing cluster resources. Each
+namespace must already contain:
 
-**From a CI image-build workflow** (recommended once one exists):
-```yaml
-- uses: peter-evans/repository-dispatch@v3
-  with:
-    token: ${{ secrets.REPO_DISPATCH_PAT }}
-    repository: rejuve-bio/mcp-xp
-    event-type: deploy-staging
-    client-payload: '{"image_tag": "${{ needs.build.outputs.tag }}"}'
-```
+- a Deployment named `mcp-app` with a container named `mcp-app`;
+- a Service named `mcp-app` that routes to that Deployment;
+- working application dependencies and image-pull credentials.
 
-**Manually via `gh`**:
-```bash
-gh api /repos/rejuve-bio/mcp-xp/dispatches \
-  -f event_type=deploy-staging \
-  -f client_payload='{"image_tag":"sha-abc1234"}'
-```
+The workflow clones `mcp-app` to `mcp-app-blue`, waits until blue is healthy,
+and adds `app.kubernetes.io/slot=blue` to the live Service selector. It then
+creates the green candidate and a ClusterIP preview Service. The legacy
+`mcp-app` Deployment is intentionally left unchanged during migration. It can
+be scaled down or removed after the first successful deployment is verified.
 
-**Manually via curl**:
-```bash
-curl -X POST -H "Authorization: token <GITHUB_PAT>" \
-  -H "Accept: application/vnd.github.v3+json" \
-  https://api.github.com/repos/rejuve-bio/mcp-xp/dispatches \
-  -d '{"event_type":"deploy-staging","client_payload":{"image_tag":"sha-abc1234"}}'
-```
+If HPAs, PodDisruptionBudgets, NetworkPolicies, or monitoring rules target the
+legacy Deployment by name, update them for both colored Deployments before
+removing the legacy Deployment.
 
-## What each workflow does
-
-1. Debug — echoes event type, image tag, and actor.
-2. Checkout the repo.
-3. Setup kubectl — writes the kubeconfig from the environment's secret
-   into `~/.kube/config`.
-4. `kubectl set image deployment/mcp-app mcp-app=rejuvebio/mcp-xp:$TAG
-   -n <namespace>` — updates the single mcp-xp deployment.
-5. `kubectl rollout status deployment/mcp-app -n <namespace>
-   --timeout=180s` — waits for the rollout to complete or fails at 3
-   minutes.
-6. `kubectl get pods -n <namespace>` — logs the current pod state.
-7. Success / failure email via `dawidd6/action-send-mail@v3`.
-
-## One-time setup
-
-### Required secrets (repo-level)
+## Required GitHub secrets
 
 | Secret | Purpose |
 |---|---|
-| `KUBECONFIG_STAGING` | full kubeconfig text pointing at the hetzner k8s cluster |
-| `KUBECONFIG_PRODUCTION` | full kubeconfig text pointing at the app.rejuve.bio k8s cluster |
-| `EMAIL_USERNAME`, `EMAIL_PASSWORD` | Gmail SMTP creds used by `action-send-mail` |
-| `RECIEVER_EMAIL` | recipient address for deploy notifications |
+| `KUBECONFIG_STAGING` | kubeconfig for `mcp-xp-staging` |
+| `KUBECONFIG_PRODUCTION` | kubeconfig for `mcp-xp-production` |
+| `DOCKER_HUB_USERNAME` | Docker Hub account allowed to push `rejuvebio/mcp-xp` |
+| `DOCKER_HUB_TOKEN` | Docker Hub access token |
+| `EMAIL_USERNAME`, `EMAIL_PASSWORD` | Gmail SMTP credentials for deployment notifications |
+| `RECIEVER_EMAIL` | Deployment-notification recipient |
 
-### Required cluster state
+The self-hosted deployment runner needs `kubectl`, Python 3, `curl`, Docker, and
+network access to the clusters and Docker Hub.
 
-- A namespace `mcp-xp-staging` on the hetzner cluster with a Deployment
-  named `mcp-app` and a container `mcp-app` running the image
-  `rejuvebio/mcp-xp:staging`. `kubectl set image` only updates the
-  image reference on an existing Deployment; it doesn't create one.
-- Same shape on the production cluster in namespace
-  `mcp-xp-production` with the image tag `production`.
-- Whatever registry hosts `rejuvebio/mcp-xp` needs to be accessible
-  from both clusters (either public Docker Hub or a
-  `imagePullSecrets`-configured private registry).
-- A separate CI workflow that **builds and pushes** the docker image
-  before firing the dispatch (this repo currently has no such
-  workflow — you'll need to add one, or push images manually).
+## Manual operations
 
-### Self-hosted runner
+Both deployment workflows support **Run workflow** in GitHub Actions.
 
-The workflows use `runs-on: self-hosted`. There needs to be at least
-one registered runner in this repo (or an org-level runner group the
-repo has access to) that has:
+- Staging `deploy`: deploy the supplied image tag to the inactive color.
+- Staging `rollback`: health-check the previous color, then switch traffic back.
+- Production `deploy`: deploy the current `staging-stable` tag.
+- Production `rollback`: health-check the previous color, then switch traffic
+  back.
 
-- Network reachability to the two k8s clusters
-- `kubectl` installed
-- No secrets exposed via other jobs on the same runner
+Production remains a separate approval boundary: passing staging does not
+automatically change production.
 
-Register a runner from Settings → Actions → Runners.
+## Failure behavior
 
-## Rollback
-
-Re-fire the dispatch with the previous good tag:
-
-```bash
-gh api /repos/rejuve-bio/mcp-xp/dispatches \
-  -f event_type=deploy-staging \
-  -f client_payload='{"image_tag":"sha-<previous-good>"}'
-```
-
-State (Redis, Qdrant, the timestamp state file) is on persistent
-volumes and unaffected by the pod image change.
+- A rollout or smoke-test failure leaves the live Service on its current color.
+- A Docker tag-promotion failure also prevents the Service switch.
+- A failed production candidate leaves production traffic unchanged.
+- Rollback validates the previous color before changing the Service selector.
