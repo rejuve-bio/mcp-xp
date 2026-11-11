@@ -392,6 +392,16 @@ async def test_unlabelled_workflow_inputs_get_unique_stable_fallback_names():
     assert missing["errors"] == {"Input 2": "Required"}
 
 
+async def test_a_run_accepts_the_fallback_name_of_an_unlabelled_input():
+    gi = _workflow_gi(_workflow("Input Dataset", "reads"))
+    gi.workflows.invoke_workflow.return_value = {"id": "inv1"}
+    reads = {"src": "hda", "id": "f2db"}
+    await _service(gi).start_run("t1", "prop_8", "req-1", WORKFLOW_TARGET, {"Input 0": reads, "reads": reads}, {})
+    kwargs = gi.workflows.invoke_workflow.call_args.kwargs
+    assert kwargs["inputs"] == {"0": reads, "reads": reads}
+    assert kwargs["inputs_by"] == "step_index|name"
+
+
 async def test_workflow_describe_matches_a_file_by_its_galaxy_extension_while_detecting():
     gi = _workflow_gi(_workflow(formats=["data"]),
                       [{"id": "d1", "hid": 1, "name": "reads", "state": "queued", "extension": "data"}])
