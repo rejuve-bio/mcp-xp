@@ -16,7 +16,7 @@ from bioblend import ConnectionError as GalaxyConnectionError
 from app.galaxy import GalaxyClient
 from app.galaxy_runs import links, status as st
 from app.galaxy_runs.store import RunStore
-from app.galaxy_runs.tool_model import describe_inputs, input_types, shape_inputs, type_of
+from app.galaxy_runs.tool_model import FILE_TYPES, describe_inputs, input_types, shape_inputs, type_of
 
 log = logging.getLogger("GalaxyRuns")
 
@@ -25,10 +25,15 @@ STDERR_LINES = 20
 SEARCH_LIMIT = 15
 REMOVED = "Removed in Galaxy"
 NOT_YOURS = "No such file for this user"
+UNKNOWN = "Unknown input"
+FILE_SRCS = {"hda", "hdca"}
+REF_KEYS = {"src", "id", "name", "hid"}  # what a card's file reference may carry
+EMPTY_FILE = (None, "", "None", [], {})
 # Dataset states: usable now ("deferred" is fetched when a job needs it), failed, or still on the way.
 FILE_READY = {"ok", "deferred"}
 FILE_FAILED = {"error", "failed_metadata", "discarded"}
-WORKFLOW_INPUT_STEPS = {"data_input", "data_collection_input", "parameter_input"}
+FILE_STEPS = {"data_input", "data_collection_input"}
+WORKFLOW_INPUT_STEPS = FILE_STEPS | {"parameter_input"}
 PUBLIC_RUN_FIELDS = ("id", "thread_id", "proposal_id", "client_request_id", "target", "status", "galaxy_state",
                      "progress", "history_id", "outputs", "error", "created_at", "updated_at")
 
@@ -44,6 +49,9 @@ class GalaxyRunsError(Exception):
 
 class _NotInGalaxy(Exception):
     pass
+
+
+_Group = Tuple[str, Dict[str, Any], Callable[[str], Optional[str]]]  # path prefix, values, path -> input type
 
 
 def _now() -> str:
@@ -63,7 +71,8 @@ class GalaxyRuns:
         self.username = username
         self.store = store
         self.cache = cache  # redis.asyncio client, or None
-        self._history_owners: Dict[str, Optional[str]] = {}  # history id -> owner's username, for this request
+        # history id -> its owner's username, asked once per request however many files are in it
+        self._history_owners: Dict[str, "asyncio.Future[Optional[str]]"] = {}
 
     # ------------------------------------------------------------------ Galaxy calls
 
@@ -145,38 +154,29 @@ class GalaxyRuns:
                        parameters: Dict[str, Any]) -> Dict[str, Any]:
         history_id = await self.thread_history(thread_id)
         if target["type"] == "tool":
-            types = input_types(await self._tool_model(target, history_id))
-            errors: Dict[str, str] = {p: "Unknown input" for p in inputs if type_of(types, p) is None}
-            model = await self._tool_model(target, history_id, inputs=shape_inputs(inputs, types))
-            errors.update(_flatten_errors(model.get("errors") or {}))
-            errors.update(_missing_required_files(model, inputs))
-            await self._file_readiness(inputs, errors)
+            model = await self._tool_model(target, history_id)
+            # Files first: a file the caller may not use is never sent to Galaxy's build, whose
+            # message about it would describe another user's dataset.
+            errors, _ = await self._file_problems(target, inputs, {}, history_id, model=model, ready=True)
+            usable = {p: v for p, v in inputs.items() if p not in errors}
+            model = await self._tool_model(target, history_id, inputs=shape_inputs(usable, input_types(model)))
+            for path, message in {**_flatten_errors(model.get("errors") or {}),
+                                  **_missing_required_files(model, inputs)}.items():
+                errors.setdefault(path, message)
             return {"valid": not errors, "errors": errors}
-        workflow = await self._workflow(target)
-        errors = {}
+        errors, workflow = await self._file_problems(target, inputs, parameters, history_id, ready=True)
         known = {e["path"]: e for e in _workflow_inputs(workflow, [])}
         for label in inputs:
             if label not in known:
-                errors[label] = "Unknown input"
+                errors.setdefault(label, UNKNOWN)
         for label, e in known.items():
-            if not e["optional"] and inputs.get(label) in (None, "", [], {}):
-                errors[label] = "Required"
-        await self._file_readiness(inputs, errors)
+            if not e["optional"] and inputs.get(label) in EMPTY_FILE:
+                errors.setdefault(label, "Required")
         return {"valid": not errors, "errors": errors}
 
-    async def _file_readiness(self, inputs: Dict[str, Any], errors: Dict[str, str]) -> None:
+    @staticmethod
+    def _not_ready(ref: Dict[str, Any], item: Dict[str, Any]) -> Optional[str]:
         """A file that is still uploading, or whose upload failed, can't run yet (uploads are Galaxy jobs)."""
-        for path, ref in _file_refs(inputs):
-            if path in errors:
-                continue
-            problem = await self._not_ready(ref)
-            if problem:
-                errors[path] = problem
-
-    async def _not_ready(self, ref: Dict[str, Any]) -> Optional[str]:
-        item = await self.own_file(ref)
-        if item is None:
-            return NOT_YOURS
         if ref["src"] == "hda":
             states = [item.get("state")]
         else:
@@ -198,6 +198,8 @@ class GalaxyRuns:
         Galaxy shows any dataset to anyone who has its id unless the owner made it private, so Galaxy
         answering is not enough: the history it is in must belong to the caller.
         """
+        if ref.get("src") not in FILE_SRCS or not isinstance(ref.get("id"), str) or not ref["id"]:
+            return None
         try:
             if ref["src"] == "hda":
                 item = await self._call(self.gi.datasets.show_dataset, ref["id"])
@@ -213,23 +215,107 @@ class GalaxyRuns:
         if not history_id:
             return False
         if history_id not in self._history_owners:
-            try:
-                owner = (await self._call(self.gi.histories.show_history, history_id)).get("username")
-            except (_NotInGalaxy, GalaxyRunsError) as e:
-                if isinstance(e, GalaxyRunsError) and e.status_code not in (404, 422):
-                    raise
-                owner = None
-            self._history_owners[history_id] = owner
-        return self._history_owners[history_id] == self.username
+            self._history_owners[history_id] = asyncio.ensure_future(self._history_owner(history_id))
+        return await self._history_owners[history_id] == self.username
 
-    async def _refuse_others_files(self, inputs: Dict[str, Any]) -> None:
-        """422, per path, for any file that isn't the caller's, before Galaxy is asked to use it."""
-        errors: Dict[str, str] = {}
-        for path, ref in _file_refs(inputs):
-            if path not in errors and await self.own_file(ref) is None:
-                errors[path] = NOT_YOURS
+    async def _history_owner(self, history_id: str) -> Optional[str]:
+        try:
+            return (await self._call(self.gi.histories.show_history, history_id)).get("username")
+        except (_NotInGalaxy, GalaxyRunsError) as e:
+            if isinstance(e, GalaxyRunsError) and e.status_code not in (404, 422):
+                raise
+            return None
+
+    async def _refuse_others_files(self, target: Dict[str, Any], inputs: Dict[str, Any], parameters: Dict[str, Any],
+                                   history_id: Optional[str]) -> Any:
+        """422, per path, for any file the caller may not use, before Galaxy is asked to use it.
+        Returns the tool model or workflow it read."""
+        errors, model = await self._file_problems(target, inputs, parameters, history_id)
         if errors:
             raise GalaxyRunsError(422, errors)
+        return model
+
+    async def _file_problems(self, target: Dict[str, Any], inputs: Dict[str, Any], parameters: Dict[str, Any],
+                             history_id: Optional[str], model: Optional[Dict[str, Any]] = None,
+                             ready: bool = False) -> Tuple[Dict[str, str], Dict[str, Any]]:
+        """{path: problem} for every value that names a file the caller may not use, with the tool model
+        or workflow read to find out. With ready, files still uploading or failed are problems too.
+
+        Galaxy reads a file input many ways (bare and database ids, other srcs, "dce:N", ...); only
+        {src: hda|hdca, id} can be checked, so any other value for a file input is refused. Workflow
+        step parameters are checked the same way, against each step's own inputs.
+        """
+        errors: Dict[str, str] = {}
+        if target["type"] == "tool":
+            model = model or await self._tool_model(target, history_id)
+            types = input_types(model)
+            groups = [("", inputs, lambda p: (type_of(types, p) or {}).get("type"))]
+        else:
+            model = await self._workflow(target)
+            groups = await self._workflow_groups(model, inputs, parameters or {}, history_id, errors)
+        refs: List[Tuple[str, Dict[str, Any]]] = []
+        for prefix, values, kind_of in groups:
+            for path, value in values.items():
+                kind = kind_of(path)
+                if kind is None:
+                    errors[prefix + path] = UNKNOWN
+                elif kind in FILE_TYPES and not _file_shaped(value):
+                    errors[prefix + path] = NOT_YOURS
+                else:
+                    refs.extend((prefix + path, ref) for ref in _file_refs(value))
+        errors.update(await self._ref_problems(refs, ready))
+        return errors, model
+
+    async def _workflow_groups(self, workflow: Dict[str, Any], inputs: Dict[str, Any], parameters: Dict[str, Any],
+                               history_id: Optional[str], errors: Dict[str, str]) -> List[_Group]:
+        """(path prefix, values, path -> input type) for a workflow's inputs and each step's parameters,
+        found the way Galaxy finds them (run_request._normalize_inputs and _step_parameters)."""
+        steps = list((workflow.get("steps") or {}).values())
+        file_labels = {_effective_label(s) for s in steps if s.get("type") in FILE_STEPS}
+        groups: List[_Group] = [
+            ("", inputs, lambda p: "data" if p in file_labels else "any")]
+        step_keys = [[str(k) for k in (s.get("tool_id"), s.get("id"), s.get("uuid")) if k is not None] for s in steps]
+        for key, value in parameters.items():
+            if not isinstance(value, dict) or not any(str(key) in keys for keys in step_keys):
+                errors[f"parameters|{key}"] = "Unknown step"
+        tools: Dict[Tuple[str, str], Dict[str, Dict[str, Any]]] = {}
+        for step, keys in zip(steps, step_keys):
+            merged: Dict[str, Any] = {}
+            for k in keys:
+                if isinstance(parameters.get(k), dict):
+                    merged.update(parameters[k])
+            if not merged:
+                continue
+            if "param" in merged and "value" in merged:
+                merged[merged.pop("param")] = merged.pop("value")
+            kind = step.get("type")
+            if kind == "tool":
+                tool = (step.get("tool_id"), step.get("tool_version") or "")
+                if tool not in tools:
+                    tools[tool] = input_types(await self._tool_model({"id": tool[0], "version": tool[1]}, history_id))
+                kind_of = (lambda types: lambda p: (type_of(types, p) or {}).get("type"))(tools[tool])
+            elif kind in FILE_STEPS:
+                kind_of = lambda p: "data"  # noqa: E731
+            elif kind == "parameter_input":
+                kind_of = lambda p: "any"  # noqa: E731
+            else:
+                kind_of = lambda p: None  # noqa: E731
+            groups.append((f"parameters|{step.get('id')}|", _flatten_step_params(merged), kind_of))
+        return groups
+
+    async def _ref_problems(self, refs: List[Tuple[str, Dict[str, Any]]], ready: bool) -> Dict[str, str]:
+        """Each file is asked for once, all at the same time."""
+        unique = {_ref_key(ref): ref for _, ref in refs}
+        found = dict(zip(unique, await asyncio.gather(*(self.own_file(ref) for ref in unique.values()))))
+        errors: Dict[str, str] = {}
+        for path, ref in refs:
+            if path in errors:
+                continue
+            item = found[_ref_key(ref)]
+            problem = NOT_YOURS if item is None else (self._not_ready(ref, item) if ready else None)
+            if problem:
+                errors[path] = problem
+        return errors
 
     # ------------------------------------------------------------------ search / files
 
@@ -284,12 +370,12 @@ class GalaxyRuns:
         if not await self.store.claim_request(self.username, client_request_id, run_id):
             return await self._repeat(client_request_id), True
         try:
-            await self._refuse_others_files(inputs)
             history_id = await self.thread_history(thread_id)
+            model = await self._refuse_others_files(target, inputs, parameters, history_id)
             if target["type"] == "tool":
-                started = await self._start_tool(target, history_id, inputs)
+                started = await self._start_tool(target, history_id, inputs, model)
             else:
-                started = await self._start_workflow(target, history_id, inputs, parameters)
+                started = await self._start_workflow(target, history_id, inputs, parameters, model)
         except Exception:
             await self.store.release_request(self.username, client_request_id)
             raise
@@ -315,8 +401,8 @@ class GalaxyRuns:
             run_id = run_id or await self.store.get_request(self.username, client_request_id)
         raise GalaxyRunsError(502, "The first request for this run is still starting. Safe to retry.")
 
-    async def _start_tool(self, target: Dict[str, Any], history_id: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        model = await self._tool_model(target, history_id)
+    async def _start_tool(self, target: Dict[str, Any], history_id: str, inputs: Dict[str, Any],
+                          model: Dict[str, Any]) -> Dict[str, Any]:
         payload = {"tool_id": model.get("id", target["id"]), "tool_version": model.get("version"),
                    "history_id": history_id, "inputs": shape_inputs(inputs, input_types(model))}
         response = await self._call(self.gi.make_post_request, self._url("tools"), payload=payload)
@@ -333,8 +419,7 @@ class GalaxyRuns:
         }
 
     async def _start_workflow(self, target: Dict[str, Any], history_id: str, inputs: Dict[str, Any],
-                              parameters: Dict[str, Any]) -> Dict[str, Any]:
-        workflow = await self._workflow(target)
+                              parameters: Dict[str, Any], workflow: Dict[str, Any]) -> Dict[str, Any]:
         steps_total = sum(1 for s in (workflow.get("steps") or {}).values() if s.get("type") not in WORKFLOW_INPUT_STEPS)
         invocation = await self._call(
             self.gi.workflows.invoke_workflow, workflow["id"], inputs=inputs, params=parameters or None,
@@ -490,7 +575,8 @@ class GalaxyRuns:
 
     async def link(self, thread_id: str, proposal_id: str, target: Dict[str, Any], inputs: Dict[str, Any],
                    parameters: Dict[str, Any]) -> Dict[str, Any]:
-        await self._refuse_others_files(inputs)
+        history_id = await self.thread_history(thread_id) if target["type"] == "tool" else None
+        await self._refuse_others_files(target, inputs, parameters, history_id)
         if target["type"] == "workflow":
             payload = {"workflow_id": target["id"], "workflow_target_type": "stored_workflow",
                        "request_state": inputs, "public": False}
@@ -502,7 +588,6 @@ class GalaxyRuns:
                 if r.get("proposal_id") == proposal_id and r.get("job_ids")]
         if runs:
             return {"url": links.rerun_url(self.galaxy_url, runs[0]["job_ids"][-1]), "kind": "rerun", "not_carried": []}
-        history_id = await self.thread_history(thread_id)
         url, not_carried = links.tool_form_url(self.galaxy_url, target["id"], target.get("version") or "",
                                                history_id, inputs)
         return {"url": url, "kind": "tool_form", "not_carried": not_carried}
@@ -559,19 +644,54 @@ def _int_or_none(value: Any) -> Optional[int]:
         return None
 
 
-def _file_refs(inputs: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
-    """(path, {src, id}) for each dataset or collection the inputs name, also inside lists and batch values."""
-    def walk(value: Any):
-        if isinstance(value, dict):
-            if value.get("src") in ("hda", "hdca") and value.get("id"):
-                yield value
-            else:
-                for v in value.values():
-                    yield from walk(v)
-        elif isinstance(value, list):
-            for v in value:
-                yield from walk(v)
-    return [(path, ref) for path, value in inputs.items() for ref in walk(value)]
+def _file_refs(value: Any) -> List[Dict[str, Any]]:
+    """Each {src, ...} a value holds, also inside lists, batch values and nested settings.
+    A src other than hda or hdca is never the caller's (own_file says None)."""
+    if isinstance(value, dict):
+        if "src" in value:
+            return [value]
+        return [ref for v in value.values() for ref in _file_refs(v)]
+    if isinstance(value, list):
+        return [ref for v in value for ref in _file_refs(v)]
+    return []
+
+
+def _ref_key(ref: Dict[str, Any]) -> Tuple[str, str]:
+    return repr(ref.get("src")), repr(ref.get("id"))
+
+
+def _is_ref(value: Any) -> bool:
+    return (isinstance(value, dict) and set(value) <= REF_KEYS and value.get("src") in FILE_SRCS
+            and isinstance(value.get("id"), str) and bool(value["id"]))
+
+
+def _file_shaped(value: Any) -> bool:
+    """Empty, {src: hda|hdca, id}, a list of them, or Galaxy's {"values": [...], "batch": ...} of them."""
+    if any(value == e and type(value) is type(e) for e in EMPTY_FILE):
+        return True
+    if isinstance(value, dict) and "values" in value:
+        value = value["values"] if set(value) <= {"values", "batch"} else None
+        return isinstance(value, list) and bool(value) and all(_is_ref(v) for v in value)
+    if isinstance(value, list):
+        return all(_is_ref(v) for v in value)
+    return _is_ref(value)
+
+
+def _effective_label(step: Dict[str, Any]) -> Optional[str]:
+    """The name Galaxy matches a workflow input by (inputs_by="name")."""
+    return step.get("label") or (step.get("tool_inputs") or {}).get("name")
+
+
+def _flatten_step_params(params: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+    """Nested step parameters as Galaxy flattens them ('a|b'), keeping {src, id} values whole."""
+    flat: Dict[str, Any] = {}
+    for key, value in params.items():
+        path = f"{prefix}|{key}" if prefix else str(key)
+        if isinstance(value, dict) and not ("src" in value and "id" in value) and key != "__POST_JOB_ACTIONS__":
+            flat.update(_flatten_step_params(value, path))
+        else:
+            flat[path] = value
+    return flat
 
 
 def _flatten_errors(errors: Any, prefix: str = "") -> Dict[str, str]:
@@ -615,7 +735,7 @@ def _workflow_inputs(workflow: Dict[str, Any], files: List[Dict[str, Any]]) -> L
         if kind not in WORKFLOW_INPUT_STEPS:
             continue
         tool_inputs = step.get("tool_inputs") or {}
-        label = step.get("label") or (step.get("annotation") or f"Input {step.get('id')}")
+        label = _effective_label(step) or step.get("annotation") or f"Input {step.get('id')}"
         entry: Dict[str, Any] = {"path": label, "label": label, "optional": bool(tool_inputs.get("optional", False))}
         if kind == "parameter_input":
             entry["type"] = tool_inputs.get("parameter_type", "text")

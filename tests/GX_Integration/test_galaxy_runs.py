@@ -446,6 +446,171 @@ async def test_a_link_with_another_users_file_is_refused():
     gi.make_post_request.assert_not_called()
 
 
+# Every other way Galaxy accepts to name a file: only {src: hda|hdca, id} is checked, so the rest are refused.
+OTHER_WAYS = [
+    "bobs",                                   # a bare encoded id
+    1234, "1234", "1,2,3",                    # database ids
+    {"src": "dce", "id": "x1"}, {"src": "ldda", "id": "x1"},
+    "__collection_reduce__|bobsc",
+    "dce:5", "hdca:5",                        # collection inputs
+    ["bobs"], [{"src": "hda", "id": "f2db"}, "bobs"],
+    {"values": [{"src": "dce", "id": "x1"}]}, {"batch": True, "values": ["bobs"]},
+    {"src": "hda", "id": 1234},
+    {"__class__": "RuntimeValue"},
+]
+IN1 = "single_paired|in1"
+WF = {"type": "workflow", "id": "wf1"}
+
+
+def _fake_workflow(gi):
+    gi.workflows.show_workflow.return_value = {"id": "wf1", "version": 1, "name": "wf", "steps": {
+        "0": {"id": 0, "type": "data_input", "label": "reads", "tool_inputs": {"optional": False}},
+        "1": {"id": 1, "type": "data_collection_input", "label": None, "tool_inputs": {"name": "samples", "optional": True}},
+        "2": {"id": 2, "type": "tool", "tool_id": TOOL_MODEL["id"], "tool_version": "1.3.7+galaxy0",
+              "uuid": "u-2", "label": None, "tool_inputs": {}},
+        "3": {"id": 3, "type": "parameter_input", "label": "min_len", "tool_inputs": {"parameter_type": "integer",
+                                                                                    "optional": True}},
+    }}
+    gi.workflows.invoke_workflow.return_value = {"id": "inv1"}
+
+
+def _with_bob(gi):
+    _bobs_files(gi)
+    _fake_workflow(gi)
+    gi.datasets.show_dataset.side_effect = lambda i: {"id": i, "state": "ok",
+                                                      "history_id": "hist1" if i == "f2db" else "hist-bob"}
+    return gi
+
+
+def _refused(e, path=IN1, message="No such file for this user"):
+    assert e.value.status_code == 422
+    assert e.value.detail == {path: message}
+
+
+@pytest.mark.parametrize("value", OTHER_WAYS)
+async def test_a_tool_run_with_a_file_named_another_way_starts_nothing(value):
+    gi = _with_bob(_fake_gi())
+    with pytest.raises(GalaxyRunsError) as e:
+        await _service(gi).start_run("t1", "prop_8", "req-1", TARGET, {**INPUTS_HDA, IN1: value}, {})
+    _refused(e)
+    gi.make_post_request.assert_not_called()
+
+
+@pytest.mark.parametrize("value", OTHER_WAYS)
+async def test_a_workflow_run_with_a_file_named_another_way_starts_nothing(value):
+    for label in ("reads", "samples"):
+        gi = _with_bob(_fake_gi())
+        with pytest.raises(GalaxyRunsError) as e:
+            await _service(gi).start_run("t1", "prop_8", "req-1", WF, {label: value}, {})
+        _refused(e, label)
+        gi.workflows.invoke_workflow.assert_not_called()
+
+
+@pytest.mark.parametrize("value", OTHER_WAYS)
+async def test_validate_treats_a_file_named_another_way_as_missing_and_never_sends_it(value):
+    gi = _with_bob(_fake_gi())
+    result = await _service(gi).validate("t1", TARGET, {**INPUTS_HDA, IN1: value}, {})
+    assert result["errors"].get(IN1) == "No such file for this user"
+    for call in gi.tools.build.call_args_list:
+        assert IN1 not in (call.kwargs.get("inputs") or {})
+    result = await _service(gi).validate("t1", WF, {"reads": value}, {})
+    assert result["errors"].get("reads") == "No such file for this user"
+
+
+@pytest.mark.parametrize("value", OTHER_WAYS)
+async def test_a_link_with_a_file_named_another_way_is_refused(value):
+    for target, path in ((TARGET, IN1), (WF, "reads")):
+        gi = _with_bob(_fake_gi())
+        inputs = {**INPUTS_HDA, IN1: value} if target is TARGET else {"reads": value}
+        with pytest.raises(GalaxyRunsError) as e:
+            await _service(gi).link("t1", "prop_8", target, inputs, {})
+        _refused(e, path)
+        gi.make_post_request.assert_not_called()
+
+
+async def test_validate_never_sends_another_users_file_to_galaxys_build():
+    gi = _with_bob(_fake_gi())
+    gi.tools.build.side_effect = lambda *a, **kw: {**TOOL_MODEL, "errors": (
+        {IN1: "Dataset bobs has been deleted"} if IN1 in (kw.get("inputs") or {}) else {})}
+    result = await _service(gi).validate("t1", TARGET, {**INPUTS_HDA, IN1: {"src": "hda", "id": "bobs"}}, {})
+    assert result["errors"] == {IN1: "No such file for this user"}
+
+
+@pytest.mark.parametrize("inputs", [
+    {"single_paired": {"single_paired_selector": "single", "in1": "bobs"}},  # Galaxy's nested form
+    {"secret": "bobs"},                                                       # a hidden input
+])
+async def test_a_tool_run_with_an_input_the_tool_does_not_show_starts_nothing(inputs):
+    gi = _with_bob(_fake_gi())
+    with pytest.raises(GalaxyRunsError) as e:
+        await _service(gi).start_run("t1", "prop_8", "req-1", TARGET, inputs, {})
+    _refused(e, next(iter(inputs)), "Unknown input")
+    gi.make_post_request.assert_not_called()
+
+
+@pytest.mark.parametrize("parameters,path", [
+    ({"2": {IN1: {"src": "hda", "id": "bobs"}}}, f"2|{IN1}"),
+    ({"2": {"single_paired": {"in1": {"src": "hdca", "id": "bobsc"}}}}, f"2|{IN1}"),  # nested, as Galaxy flattens it
+    ({"2": {IN1: "bobs"}}, f"2|{IN1}"),
+    ({"2": {IN1: {"src": "dce", "id": "x1"}}}, f"2|{IN1}"),
+    ({TOOL_MODEL["id"]: {IN1: "1234"}}, f"2|{IN1}"),                   # by tool id
+    ({"u-2": {"param": IN1, "value": "bobs"}}, f"2|{IN1}"),            # by uuid, one-parameter form
+    ({"2": {"secret": "bobs"}}, "2|secret"),                            # an input the tool does not show
+    ({"9": {"x": 1}}, "9"),                                             # no such step
+    ({"0": {"input": "bobs"}}, "0|input"),                              # an input step
+    ({"3": {"x": {"src": "hda", "id": "bobs"}}}, "3|x"),
+])
+async def test_workflow_parameters_with_another_users_file_start_nothing(parameters, path):
+    gi = _with_bob(_fake_gi())
+    for call in ("start_run", "link"):
+        svc = _service(gi)
+        args = ("t1", "prop_8", "req-1") if call == "start_run" else ("t1", "prop_8")
+        with pytest.raises(GalaxyRunsError) as e:
+            await getattr(svc, call)(*args, WF, {"reads": {"src": "hda", "id": "f2db"}}, parameters)
+        assert e.value.status_code == 422 and list(e.value.detail) == [f"parameters|{path}"]
+    gi.workflows.invoke_workflow.assert_not_called()
+    gi.make_post_request.assert_not_called()
+    result = await _service(gi).validate("t1", WF, {"reads": {"src": "hda", "id": "f2db"}}, parameters)
+    assert list(result["errors"]) == [f"parameters|{path}"]
+
+
+async def test_a_workflow_run_with_own_files_and_plain_parameters_starts():
+    gi = _with_bob(_fake_gi())
+    parameters = {"2": {"filter_options": {"length_required": 30}, IN1: {"src": "hda", "id": "f2db"}}}
+    run, _ = await _service(gi).start_run("t1", "prop_8", "req-1", WF,
+                                          {"reads": {"src": "hda", "id": "f2db"}, "samples": None, "min_len": 5},
+                                          parameters)
+    assert run["status"] == "queued"
+    assert gi.workflows.invoke_workflow.call_args.kwargs["params"] == parameters
+
+
+async def test_files_are_checked_at_the_same_time_and_each_history_once():
+    import asyncio
+    gi = _fake_gi()
+    started, release = [], asyncio.Event()
+
+    def show(i):
+        started.append(i)
+        return {"id": i, "state": "ok", "history_id": "hist1"}
+    gi.datasets.show_dataset.side_effect = show
+    svc = _service(gi)
+    original = svc._call
+
+    async def slow_call(fn, *a, **kw):
+        if fn is gi.datasets.show_dataset:
+            result = await original(fn, *a, **kw)
+            if len(started) == 3:
+                release.set()
+            await asyncio.wait_for(release.wait(), 2)  # only returns once all three were asked for
+            return result
+        return await original(fn, *a, **kw)
+    svc._call = slow_call
+    inputs = {**INPUTS_HDA, IN1: [{"src": "hda", "id": i} for i in ("a", "b", "c")]}
+    await svc.start_run("t1", "prop_8", "req-1", TARGET, inputs, {})
+    assert sorted(started) == ["a", "b", "c"]
+    assert gi.histories.show_history.call_count == 1
+
+
 # ---------------------------------------------------------------- /v1/datasets
 
 import httpx  # noqa: E402
