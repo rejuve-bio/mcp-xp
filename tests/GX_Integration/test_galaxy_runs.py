@@ -437,6 +437,28 @@ async def test_upload_needs_thread_id_first_a_file_and_stays_under_the_cap(monke
     assert e.value.status_code == 413
 
 
+@pytest.mark.parametrize("chunk_size", [1_000_000, 7], ids=["one-chunk", "many-chunks"])
+async def test_upload_rejects_thread_id_after_the_file_however_the_body_arrives(chunk_size):
+    svc = _service(_fake_gi())
+    seen = {}
+    body, ctype = _multipart([("format", "txt")], b"data", [("thread_id", "t1")])
+    with pytest.raises(GalaxyRunsError) as e:
+        await datasets.upload(svc, ctype, str(len(body)), _chunks(body, chunk_size), http=_galaxy_fetch(seen))
+    assert (e.value.status_code, e.value.detail) == (400, "thread_id must come before the file")
+    assert seen == {}  # nothing reached Galaxy
+
+
+@pytest.mark.parametrize("chunk_size", [1_000_000, 7], ids=["one-chunk", "many-chunks"])
+async def test_upload_takes_format_before_or_after_the_file(chunk_size):
+    for before, after in [([("thread_id", "t1"), ("format", "txt")], []), ([("thread_id", "t1")], [("format", "txt")])]:
+        seen = {}
+        body, ctype = _multipart(before, b"data", after)
+        dataset = await datasets.upload(_service(_fake_gi()), ctype, str(len(body)), _chunks(body, chunk_size),
+                                        http=_galaxy_fetch(seen))
+        assert dataset["id"] == "ds1"
+        assert b'"ext": "txt"' in seen["body"]
+
+
 def _galaxy_display(seen, status=206, body=b"ACGT"):
     async def handler(request: httpx.Request):
         seen["url"] = str(request.url)
