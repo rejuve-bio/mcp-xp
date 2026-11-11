@@ -1,22 +1,44 @@
-name: CD - Deploy mcp-xp to Kubernetes (staging / hetzner)
+name: CD - Blue-green deploy to staging
 
 on:
   repository_dispatch:
     types: [deploy-staging]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Deploy a candidate or switch back to the previous color
+        required: true
+        type: choice
+        options: [deploy, rollback]
+        default: deploy
+      image_tag:
+        description: Image tag to deploy
+        required: false
+        default: staging
 
 permissions:
   contents: read
 
+concurrency:
+  group: mcp-xp-staging-deployment
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: rejuvebio/mcp-xp
+  NAMESPACE: mcp-xp-staging
+  DEPLOYMENT_NAME: mcp-app
+  CONTAINER_NAME: mcp-app
+  LIVE_SERVICE: mcp-app
+  PREVIEW_SERVICE: mcp-app-preview
+  CONTAINER_PORT: "8895"
+  LOCAL_PORT: "18895"
+  HEALTH_PATH: /
+
 jobs:
   deploy:
+    if: github.event_name == 'repository_dispatch' || inputs.action == 'deploy'
     runs-on: self-hosted
     steps:
-      - name: Debug workflow info
-        run: |
-          echo "Event Type: ${{ github.event.action }}"
-          echo "Image Tag: ${{ github.event.client_payload.image_tag }}"
-          echo "Triggered by: ${{ github.actor }}"
-
       - name: Checkout current repository
         uses: actions/checkout@v4
 
@@ -25,33 +47,52 @@ jobs:
           mkdir -p ~/.kube
           echo "${{ secrets.KUBECONFIG_STAGING }}" > ~/.kube/config
           chmod 600 ~/.kube/config
-          echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
 
-      - name: Deploy to Kubernetes
+      - name: Select immutable candidate image
+        id: image
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.image_tag }}
+          MANUAL_TAG: ${{ inputs.image_tag }}
         run: |
-          set -euo pipefail
+          TAG="${DISPATCH_TAG:-${MANUAL_TAG:-staging}}"
+          echo "image=${IMAGE_REPOSITORY}:${TAG}" >> "$GITHUB_OUTPUT"
 
-          NAMESPACE="mcp-xp-staging"
-          TAG="${{ github.event.client_payload.image_tag }}"
-
-          if [ -z "$TAG" ]; then
-            TAG="staging"
-          fi
-
-          echo "Using image tag: $TAG"
-
-          kubectl set image deployment/mcp-app \
-            mcp-app=rejuvebio/mcp-xp:${TAG} \
-            -n "$NAMESPACE"
-
-      - name: Wait for rollout
+      - name: Deploy and validate inactive color
+        id: candidate
+        env:
+          ACTION: prepare
+          IMAGE: ${{ steps.image.outputs.image }}
         run: |
-          set -euo pipefail
-          kubectl rollout status deployment/mcp-app -n mcp-xp-staging --timeout=180s
+          chmod +x scripts/blue_green_deploy.sh
+          scripts/blue_green_deploy.sh
 
-      - name: Verify all pods
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Promote validated image to staging-stable
+        env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.image }}
         run: |
-          kubectl get pods -n mcp-xp-staging
+          docker pull "$CANDIDATE_IMAGE"
+          docker tag "$CANDIDATE_IMAGE" "${IMAGE_REPOSITORY}:staging-stable"
+          docker push "${IMAGE_REPOSITORY}:staging-stable"
+
+      - name: Switch staging traffic to validated color
+        env:
+          ACTION: switch
+          TARGET_SLOT: ${{ steps.candidate.outputs.target-slot }}
+        run: scripts/blue_green_deploy.sh
+
+      - name: Show active color
+        run: |
+          kubectl get service "$LIVE_SERVICE" -n "$NAMESPACE" \
+            -o jsonpath='Active slot: {.spec.selector.app\.kubernetes\.io/slot}{"\n"}'
+          kubectl get deployments -n "$NAMESPACE" \
+            -l app.kubernetes.io/name=mcp-app
 
       - name: Send success email
         if: success()
@@ -61,17 +102,10 @@ jobs:
           server_port: 587
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "CD Pipeline SUCCESS - mcp-xp Deployed to K8s (staging)"
+          subject: CD Blue-Green SUCCESS - mcp-xp staging promoted
           to: ${{ secrets.RECIEVER_EMAIL }}
           from: GitHub Actions <${{ secrets.EMAIL_USERNAME }}>
-          body: |
-            mcp-xp deployment to Kubernetes staging completed successfully!
-
-            Repository: ${{ github.repository }}
-            Triggered by: ${{ github.actor }}
-            Image tag: ${{ github.event.client_payload.image_tag }}
-
-            mcp-app pod updated and running in mcp-xp-staging namespace.
+          body: Staging traffic switched after the inactive color passed its smoke test.
 
       - name: Send failure email
         if: failure()
@@ -81,14 +115,27 @@ jobs:
           server_port: 587
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "CD Pipeline FAILED - mcp-xp K8s Deploy (staging)"
+          subject: CD Blue-Green FAILED - inspect mcp-xp staging
           to: ${{ secrets.RECIEVER_EMAIL }}
           from: GitHub Actions <${{ secrets.EMAIL_USERNAME }}>
-          body: |
-            mcp-xp Kubernetes staging deployment failed!
+          body: The staging deployment workflow failed. Review the logs and active Service selector before retrying.
 
-            Repository: ${{ github.repository }}
-            Triggered by: ${{ github.actor }}
-            Image tag: ${{ github.event.client_payload.image_tag }}
+  rollback:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'rollback'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
 
-            Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_STAGING }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Validate previous color and switch traffic back
+        env:
+          ACTION: rollback
+        run: |
+          chmod +x scripts/blue_green_deploy.sh
+          scripts/blue_green_deploy.sh
