@@ -32,6 +32,10 @@ EMPTY_FILE = (None, "", "None", [], {})
 # Dataset states: usable now ("deferred" is fetched when a job needs it), failed, or still on the way.
 FILE_READY = {"ok", "deferred"}
 FILE_FAILED = {"error", "failed_metadata", "discarded"}
+# Extensions Galaxy shows while it is still detecting an uploaded file's format.
+FORMAT_PLACEHOLDERS = {"data", "auto"}
+# Labels Galaxy fills in for an unlabelled workflow input; runs can't name the input by them.
+GENERIC_INPUT_LABELS = {"Input Dataset", "Input Dataset Collection", "Input Parameter"}
 FILE_STEPS = {"data_input", "data_collection_input"}
 WORKFLOW_INPUT_STEPS = FILE_STEPS | {"parameter_input"}
 PUBLIC_RUN_FIELDS = ("id", "thread_id", "proposal_id", "client_request_id", "target", "status", "galaxy_state",
@@ -144,7 +148,7 @@ class GalaxyRuns:
                                "version": model.get("version"), "name": model.get("name")},
                     **described}
         workflow = await self._workflow(target)
-        files = await self.thread_files(thread_id)
+        files = await self.thread_files(thread_id, galaxy_formats=True)
         entries = _workflow_inputs(workflow, files["items"])
         return {"target": {"type": "workflow", "id": workflow["id"], "version": str(workflow.get("version", "")),
                            "name": workflow.get("name")},
@@ -165,6 +169,8 @@ class GalaxyRuns:
                 errors.setdefault(path, message)
             return {"valid": not errors, "errors": errors}
         errors, workflow = await self._file_problems(target, inputs, parameters, history_id, ready=True)
+        for path, message in _label_clashes(workflow).items():
+            errors.setdefault(path, message)
         known = {e["path"]: e for e in _workflow_inputs(workflow, [])}
         for label in inputs:
             if label not in known:
@@ -271,9 +277,10 @@ class GalaxyRuns:
         """(path prefix, values, path -> input type) for a workflow's inputs and each step's parameters,
         found the way Galaxy finds them (run_request._normalize_inputs and _step_parameters)."""
         steps = list((workflow.get("steps") or {}).values())
-        file_labels = {_effective_label(s) for s in steps if s.get("type") in FILE_STEPS}
-        groups: List[_Group] = [
-            ("", inputs, lambda p: "data" if p in file_labels else "any")]
+        # Input paths as describe names them; any other key is not an input of this workflow.
+        paths = {path: ("data" if step.get("type") in FILE_STEPS else "any")
+                 for _, step, path, _ in _input_steps(workflow)}
+        groups: List[_Group] = [("", inputs, paths.get)]
         step_keys = [[str(k) for k in (s.get("tool_id"), s.get("id"), s.get("uuid")) if k is not None] for s in steps]
         for key, value in parameters.items():
             if not isinstance(value, dict) or not any(str(key) in keys for keys in step_keys):
@@ -343,7 +350,8 @@ class GalaxyRuns:
         return {"type": "tool", "id": t.get("id", tool_id), "version": t.get("version"),
                 "name": t.get("name"), "description": t.get("description")}
 
-    async def thread_files(self, thread_id: str) -> Dict[str, Any]:
+    async def thread_files(self, thread_id: str, galaxy_formats: bool = False) -> Dict[str, Any]:
+        """galaxy_formats keeps Galaxy's extension as is, instead of "auto" while Galaxy is still detecting it."""
         history_id = await self.thread_history(thread_id, create=False)
         if not history_id:
             return {"items": [], "next_cursor": None}
@@ -357,7 +365,8 @@ class GalaxyRuns:
             if collection:
                 item["collection_type"] = c.get("collection_type")
             else:
-                item["format"] = c.get("extension")
+                detecting = item["state"] not in FILE_READY | FILE_FAILED and c.get("extension") in FORMAT_PLACEHOLDERS
+                item["format"] = "auto" if detecting and not galaxy_formats else c.get("extension")
             items.append(item)
         return {"items": items, "next_cursor": None}
 
@@ -421,9 +430,15 @@ class GalaxyRuns:
     async def _start_workflow(self, target: Dict[str, Any], history_id: str, inputs: Dict[str, Any],
                               parameters: Dict[str, Any], workflow: Dict[str, Any]) -> Dict[str, Any]:
         steps_total = sum(1 for s in (workflow.get("steps") or {}).values() if s.get("type") not in WORKFLOW_INPUT_STEPS)
+        clashes = _label_clashes(workflow)
+        if clashes:
+            raise GalaxyRunsError(422, clashes)
+        # An unlabelled input has no name Galaxy knows, so its fallback path goes by step index.
+        by_index = {path: index for index, _, path, labelled in _input_steps(workflow) if not labelled}
+        inputs = {by_index.get(path, path): value for path, value in inputs.items()}
         invocation = await self._call(
             self.gi.workflows.invoke_workflow, workflow["id"], inputs=inputs, params=parameters or None,
-            history_id=history_id, inputs_by="name", version=_int_or_none(target.get("version")))
+            history_id=history_id, inputs_by="step_index|name", version=_int_or_none(target.get("version")))
         return {
             "target": {"type": "workflow", "id": workflow["id"], "version": str(workflow.get("version", "")),
                        "name": workflow.get("name")},
@@ -677,11 +692,6 @@ def _file_shaped(value: Any) -> bool:
     return _is_ref(value)
 
 
-def _effective_label(step: Dict[str, Any]) -> Optional[str]:
-    """The name Galaxy matches a workflow input by (inputs_by="name")."""
-    return step.get("label") or (step.get("tool_inputs") or {}).get("name")
-
-
 def _flatten_step_params(params: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
     """Nested step parameters as Galaxy flattens them ('a|b'), keeping {src, id} values whole."""
     flat: Dict[str, Any] = {}
@@ -727,15 +737,43 @@ def _matches_when(value: Any, expected: Any) -> bool:
     return str(value) in {str(v) for v in expected_values}
 
 
+def _input_steps(workflow: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any], str, bool]]:
+    """(step index, step, path, labelled) for each workflow input step.
+
+    Galaxy 26.1 steps carry no label: it is in the top-level inputs map, keyed by step index. A labelled input's
+    path is that label, the name Galaxy invokes it by. An unlabelled input (Galaxy fills in a generic label) is
+    "Input <step index>" ("Input <step index> (unlabelled)" if a real label is already that): unique and stable,
+    and runs send it to Galaxy by step index.
+    """
+    labels = {str(k): (v or {}).get("label") for k, v in (workflow.get("inputs") or {}).items()}
+    steps = [(str(index), step, labels.get(str(index)) or step.get("label"))
+             for index, step in sorted((workflow.get("steps") or {}).items(), key=lambda kv: int(kv[0]))
+             if step.get("type") in WORKFLOW_INPUT_STEPS]
+    real = {label for _, _, label in steps if label and label not in GENERIC_INPUT_LABELS}
+    found = []
+    for index, step, label in steps:
+        if label in real:
+            found.append((index, step, label, True))
+        else:
+            fallback = f"Input {index}"
+            found.append((index, step, fallback if fallback not in real else f"{fallback} (unlabelled)", False))
+    return found
+
+
+def _label_clashes(workflow: Dict[str, Any]) -> Dict[str, str]:
+    """Labels that are another input step's number: with inputs_by="step_index|name" Galaxy can't tell them apart."""
+    found = _input_steps(workflow)
+    indexes = {index for index, _, _, _ in found}
+    return {path: "Rename this input in Galaxy: its label is also a step number"
+            for index, _, path, labelled in found if labelled and path != index and path in indexes}
+
+
 def _workflow_inputs(workflow: Dict[str, Any], files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """A workflow's inputs by label, with the thread's matching files for file inputs."""
+    """A workflow's inputs by path (see _input_steps), with the thread's matching files for file inputs."""
     entries = []
-    for step in sorted((workflow.get("steps") or {}).values(), key=lambda s: s.get("id", 0)):
+    for _, step, label, _ in _input_steps(workflow):
         kind = step.get("type")
-        if kind not in WORKFLOW_INPUT_STEPS:
-            continue
         tool_inputs = step.get("tool_inputs") or {}
-        label = _effective_label(step) or step.get("annotation") or f"Input {step.get('id')}"
         entry: Dict[str, Any] = {"path": label, "label": label, "optional": bool(tool_inputs.get("optional", False))}
         if kind == "parameter_input":
             entry["type"] = tool_inputs.get("parameter_type", "text")
