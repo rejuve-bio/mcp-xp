@@ -7,9 +7,12 @@ a run that has ended is answered from Mongo, since it never changes again.
 import asyncio
 import json
 import logging
+import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from bioblend import ConnectionError as GalaxyConnectionError
 
@@ -21,6 +24,8 @@ from app.galaxy_runs.tool_model import FILE_TYPES, describe_inputs, input_types,
 log = logging.getLogger("GalaxyRuns")
 
 CACHE_SECONDS = 5
+# An import still unfinished after this long was abandoned (e.g. mcp-xp restarted mid-call); a retry takes it over.
+IMPORT_STALE_SECONDS = 120
 STDERR_LINES = 20
 SEARCH_LIMIT = 15
 REMOVED = "Removed in Galaxy"
@@ -370,6 +375,87 @@ class GalaxyRuns:
             items.append(item)
         return {"items": items, "next_cursor": None}
 
+    # ------------------------------------------------------------------ import by link
+
+    async def import_dataset(self, thread_id: str, url: str, name: str, deferred: bool, client_request_id: str,
+                             sha256: Optional[str], fmt: Optional[str]) -> Tuple[Dict[str, Any], bool]:
+        """A dataset in the thread's history made from a link (the file service's deliveries).
+
+        Deferred, Galaxy keeps only the link and fetches the bytes when a job needs them. Returns
+        (dataset, repeat): a repeated client_request_id returns the dataset made the first time.
+        """
+        if not await self._claim_import(client_request_id):
+            return await self._repeat_import(client_request_id), True
+        try:
+            history_id = await self._import_history(thread_id)
+            element: Dict[str, Any] = {"src": "url", "url": url, "name": name, "ext": fmt or "auto",
+                                       "deferred": deferred}
+            if sha256:
+                element["hashes"] = [{"hash_function": "SHA-256", "hash_value": sha256}]
+            payload = {"history_id": history_id,
+                       "targets": [{"destination": {"type": "hdas"}, "elements": [element]}]}
+            response = await self._fetch_link(payload, url)
+            out = ((response or {}).get("outputs") or [{}])[0]
+            if not out.get("id"):
+                raise GalaxyRunsError(502, "Galaxy accepted the link but made no dataset. Safe to retry.")
+            ext = out.get("extension") or out.get("file_ext")
+            dataset = {"id": out["id"], "name": out.get("name") or name, "state": out.get("state"),
+                       "format": ext if ext and ext != "auto" else "auto", "history_id": history_id}
+            await self.store.save_import(self.username, client_request_id, dataset)
+        except BaseException:
+            # Nothing usable was recorded: let a retry make it (a dataset Galaxy did make stays unused).
+            await self.store.release_import(self.username, client_request_id)
+            raise
+        return dataset, False
+
+    async def _claim_import(self, client_request_id: str) -> bool:
+        now = time.time()
+        if await self.store.claim_import(self.username, client_request_id, now):
+            return True
+        record = await self.store.get_import(self.username, client_request_id)
+        if record and not record.get("dataset") and now - (record.get("claimed_at") or 0) > IMPORT_STALE_SECONDS:
+            await self.store.release_import(self.username, client_request_id)
+            return await self.store.claim_import(self.username, client_request_id, now)
+        return False
+
+    async def _import_history(self, thread_id: str) -> str:
+        """The thread's history; Galaxy refusing it is a refusal here, never 404 (read as "not deployed")."""
+        try:
+            return await self.thread_history(thread_id)
+        except _NotInGalaxy as e:
+            raise GalaxyRunsError(422, f"Galaxy refused the thread's history: {e}") from None
+        except GalaxyRunsError as e:
+            if e.status_code == 404:
+                raise GalaxyRunsError(422, "Galaxy refused the thread's history.") from None
+            raise
+
+    async def _fetch_link(self, payload: Dict[str, Any], url: str) -> Dict[str, Any]:
+        """Galaxy's fetch API with the link. Its messages may quote the link, which carries a token, so
+        they are redacted before they are logged or answered. Galaxy's 404/403 are refusals here, never
+        404: the file service reads a 404 from this route as "not deployed"."""
+        try:
+            return await asyncio.to_thread(self.gi.make_post_request, self._url("tools/fetch"), payload=payload)
+        except GalaxyConnectionError as e:
+            code = getattr(e, "status_code", None)
+            message = _redact_link(_galaxy_message(e), url)
+            if code == 401:
+                raise GalaxyRunsError(401, "Galaxy did not accept the user's key") from None
+            if code in (400, 403, 404, 422):
+                raise GalaxyRunsError(422, message if isinstance(message, str) else "Galaxy refused the file.") from None
+            log.error("Galaxy import failed (%s): %s", code, message)
+            raise GalaxyRunsError(502, "Galaxy failed. Safe to retry.") from None
+
+    async def _repeat_import(self, client_request_id: str) -> Dict[str, Any]:
+        # The first request may still be talking to Galaxy; give it a few seconds.
+        for _ in range(20):
+            record = await self.store.get_import(self.username, client_request_id)
+            if record is None:
+                break  # the first request failed and let go: this one may try again
+            if record.get("dataset"):
+                return record["dataset"]
+            await asyncio.sleep(0.5)
+        raise GalaxyRunsError(502, "The first request for this file is still running. Safe to retry.")
+
     # ------------------------------------------------------------------ start a run
 
     async def start_run(self, thread_id: str, proposal_id: str, client_request_id: str, target: Dict[str, Any],
@@ -650,6 +736,26 @@ def _galaxy_message(e: GalaxyConnectionError) -> Any:
     if isinstance(parsed, dict):
         return parsed.get("err_msg") or parsed.get("detail") or parsed
     return str(body or e)
+
+
+_LINK_TOKEN = re.compile(r"/v1/links/[^/\s\"'<>]+")
+
+
+_LINK_TOKEN_ENCODED = re.compile(r"%2Fv1%2Flinks%2F[^%\s\"'<>]+", re.IGNORECASE)
+
+
+def _redact_link(message: Any, url: str) -> Any:
+    """Galaxy's message without the link or its token, also inside lists and when URL-encoded."""
+    if isinstance(message, dict):
+        return {k: _redact_link(v, url) for k, v in message.items()}
+    if isinstance(message, list):
+        return [_redact_link(v, url) for v in message]
+    if not isinstance(message, str):
+        return message
+    for form in (url, quote(url, safe="")):
+        message = message.replace(form, "<link>")
+    message = _LINK_TOKEN.sub("/v1/links/<redacted>", message)
+    return _LINK_TOKEN_ENCODED.sub("%2Fv1%2Flinks%2F<redacted>", message)
 
 
 def _int_or_none(value: Any) -> Optional[int]:
