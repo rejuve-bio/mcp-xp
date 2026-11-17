@@ -86,6 +86,12 @@ curl -X POST -H "Authorization: token <GITHUB_PAT>" \
   image reference on an existing Deployment; it doesn't create one.
 - Same shape on the production cluster in namespace
   `mcp-xp-production` with the image tag `production`.
+- Each Deployment's environment includes `JWT_SECRET`: the
+  `JWT_SECRET_KEY` of the auth service whose login tokens that
+  environment accepts (comma-separate several). Without it the app
+  and the MCP server refuse to start. Roll a new environment out with
+  `JWT_VERIFY=report` first, check the logs for "would be rejected",
+  then switch to `enforce` (the default). See `.env.example`.
 - Whatever registry hosts `rejuvebio/mcp-xp` needs to be accessible
   from both clusters (either public Docker Hub or a
   `imagePullSecrets`-configured private registry).

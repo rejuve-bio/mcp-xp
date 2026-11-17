@@ -3,7 +3,6 @@ import logging
 from typing import Optional
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-import httpx
 import requests
 from dotenv import load_dotenv
 from bioblend import galaxy
@@ -18,6 +17,7 @@ from tenacity import (
     retry_if_exception_type
     )
 
+from app.auth import galaxy_accounts
 from app.context import current_user_email
 
 load_dotenv()
@@ -123,31 +123,21 @@ class GalaxyClient:
         self.config_client = galaxy.config.ConfigClient(self.gi_client)
 
     def _refresh_user_key(self) -> str:
-        """Mint a fresh user API key using the admin key. Requires user_email."""
+        """Switch to the user's current Galaxy key after Galaxy reported this one expired.
+
+        Reads the newest key with the admin key instead of minting another, so
+        it doesn't expire the key held by the user's other sessions. Needs
+        user_email, which is set only from a verified login token.
+        """
         if not self.user_email or not self.admin_api_key:
             raise RuntimeError(
                 "Cannot auto-refresh API key: user_email or admin_api_key missing"
             )
         self.logger.info(f"Refreshing expired Galaxy API key for {self.user_email}")
-        headers = {"x-api-key": self.admin_api_key}
-        with httpx.Client(timeout=5.0) as c:
-            r = c.get(
-                f"{self.galaxy_url}/api/users",
-                headers=headers,
-                params={"f_email": self.user_email},
-            )
-            r.raise_for_status()
-            users = r.json()
-            if not users:
-                raise RuntimeError(f"No Galaxy user found for email {self.user_email}")
-            uid = users[0]["id"]
-            r = c.post(
-                f"{self.galaxy_url}/api/users/{uid}/api_key",
-                headers=headers,
-                json={"name": "auto-refresh"},
-            )
-            r.raise_for_status()
-            new_key = r.json()
+        galaxy_accounts.forget_key(self.user_email)
+        new_key, _ = galaxy_accounts.key_for_email(self.user_email, create=False)
+        if not new_key:
+            raise RuntimeError(f"No Galaxy user found for email {self.user_email}")
 
         # Swap the key in-place and rebuild gi_object so subsequent calls use it
         self.user_api_key = new_key
