@@ -98,3 +98,25 @@ automatically change production.
 - A Docker tag-promotion failure also prevents the Service switch.
 - A failed production candidate leaves production traffic unchanged.
 - Rollback validates the previous color before changing the Service selector.
+
+## Docker Compose dev host
+
+The dev host (`dev.rejuve.bio`) runs `docker-compose.yml` directly, not
+Kubernetes.
+
+- Every port is published on `127.0.0.1` only. Redis, Qdrant and MongoDB run
+  without passwords, and Docker's own firewall rules bypass `ufw`, so they
+  must not listen on public interfaces. The app is reached through the host's
+  nginx, which proxies to `127.0.0.1:$APP_PORT` and `127.0.0.1:$MCP_PORT`.
+- The file service calls mcp-xp at `http://mcp-app:8895` over its network
+  `file-service-net`. `docker-compose.file-service.yml` attaches `mcp-app` to
+  it; it is kept out of the main file because `docker compose up` fails where
+  that network doesn't exist. Enable it in that checkout's `.env`:
+
+  ```bash
+  COMPOSE_FILE=docker-compose.yml:docker-compose.file-service.yml
+  ```
+
+  Plain `docker compose` and `make docker-up` both read it, so recreating
+  the container keeps it on the network. Check with
+  `docker network inspect file-service-net` (it should list `mcp-app`).

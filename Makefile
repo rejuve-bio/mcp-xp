@@ -25,6 +25,12 @@ ifneq (,$(wildcard .env))
     export
 endif
 
+# Honour COMPOSE_FILE from .env (e.g. docker-compose.yml:docker-compose.file-service.yml
+# on the dev host) the way plain `docker compose` does.
+ifneq ($(ENV),dev)
+	COMPOSE := docker compose $(addprefix -f ,$(subst :, ,$(COMPOSE_FILE)))
+endif
+
 # Local development commands
 sync:
 	uv sync
