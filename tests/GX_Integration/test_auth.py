@@ -310,6 +310,34 @@ class TestExpiredKeyRecovery:
         assert galaxy.minted == 0
         assert galaxy_accounts.cached_key("a@x.org") == "current"
 
+    def test_bioblend_request_with_expired_key_is_retried_with_current_key(self, galaxy, monkeypatch):
+        """bioblend sends requests with plain `requests`; recovery must still apply."""
+        import requests
+        from bioblend import galaxyclient
+        from app.galaxy import GalaxyClient
+
+        uid = galaxy.add_user("a@x.org", "pw", key="old")
+        galaxy.keys[uid].append("current")
+        seen = []
+
+        def fake_get(url, headers=None, **kwargs):
+            key = headers.get("x-api-key")
+            seen.append(key)
+            resp = requests.Response()
+            resp.url = url
+            if key == "current":
+                resp.status_code, resp._content = 200, json.dumps({"id": uid, "username": "a"}).encode()
+            else:
+                resp.status_code = 401
+                resp._content = json.dumps({"err_msg": "Provided API key has expired.", "err_code": 401001}).encode()
+            return resp
+
+        monkeypatch.setattr(galaxyclient.requests, "get", fake_get)
+        gc = GalaxyClient("old", galaxy_url=GALAXY, user_email="a@x.org")
+        assert gc.whoami == "a"
+        assert seen == ["old", "current"]
+        assert gc.user_api_key == "current" and galaxy.minted == 0
+
     def test_no_refresh_without_a_verified_email(self, galaxy):
         from app.galaxy import GalaxyClient
         gc = GalaxyClient("old", galaxy_url=GALAXY, user_email=None)

@@ -1,7 +1,7 @@
 import os
+import json
 import logging
 from typing import Optional
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 import requests
 from dotenv import load_dotenv
@@ -23,47 +23,40 @@ from app.context import current_user_email
 load_dotenv()
 
 
-class _AutoRefreshSession(requests.Session):
-    """Intercepts all bioblend requests. On 'API key expired' (Galaxy err_code
-    401001), refreshes the user's Galaxy API key via the admin key and retries
-    the request once with the new key swapped into the URL / headers.
-    """
-
-    def __init__(self, owner: "GalaxyClient"):
-        super().__init__()
-        self._owner = owner
-        self._refreshing = False  # prevent recursive refresh
-
-    def send(self, request, **kwargs):
-        response = super().send(request, **kwargs)
-        if response.status_code == 401 and not self._refreshing:
-            try:
-                body = response.json()
-            except Exception:
-                body = {}
-            if (body.get("err_code") == 401001
-                    and "expired" in body.get("err_msg", "").lower()):
-                self._refreshing = True
-                try:
-                    new_key = self._owner._refresh_user_key()
-                    request.url = _replace_key_in_url(request.url, new_key)
-                    if "x-api-key" in request.headers:
-                        request.headers["x-api-key"] = new_key
-                    response = super().send(request, **kwargs)
-                except Exception as e:
-                    self._owner.logger.warning(f"Auto-refresh failed: {e}")
-                finally:
-                    self._refreshing = False
-        return response
+# bioblend's request methods; each sends the key from gi_client.json_headers.
+_REQUEST_METHODS = (
+    "make_get_request", "make_post_request", "make_put_request",
+    "make_delete_request", "make_patch_request",
+)
 
 
-def _replace_key_in_url(url: str, new_key: str) -> str:
-    """Swap ?key=... in URL with the new API key (bioblend's auth pattern)."""
-    parts = urlparse(url)
-    q = parse_qs(parts.query, keep_blank_values=True)
-    if "key" in q:
-        q["key"] = [new_key]
-    return urlunparse(parts._replace(query=urlencode(q, doseq=True)))
+def _is_expired_key(status_code, body) -> bool:
+    """Galaxy's answer for a key that is no longer the user's newest one."""
+    if status_code != 401:
+        return False
+    try:
+        data = json.loads(body) if isinstance(body, (str, bytes)) else body
+    except ValueError:
+        return False
+    return isinstance(data, dict) and data.get("err_code") == 401001
+
+
+def _with_key_recovery(owner: "GalaxyClient", method):
+    """Retry a bioblend request once with the user's current key when Galaxy
+    says the key expired. GET/DELETE return the response; the others raise."""
+    def call(*args, **kwargs):
+        try:
+            result = method(*args, **kwargs)
+        except GalaxyConnectionError as e:
+            if _is_expired_key(e.status_code, e.body) and owner._recover_key():
+                return method(*args, **kwargs)
+            raise
+        if (isinstance(result, requests.Response)
+                and _is_expired_key(result.status_code, result.content)
+                and owner._recover_key()):
+            return method(*args, **kwargs)
+        return result
+    return call
 
 
 class GalaxyClient:
@@ -83,6 +76,7 @@ class GalaxyClient:
 
         # Retry and logger config
         self.max_retries: int = 3
+        self._key_recovered = False
         self.logger = logging.getLogger(self.__class__.__name__)
 
         if not self.galaxy_url:
@@ -117,9 +111,10 @@ class GalaxyClient:
             url=self.galaxy_url, api_key=self.user_api_key
         )
         self.gi_client = self.gi_object.gi
-        # Replace bioblend's session with our auto-refresh session so every
-        # bioblend HTTP call goes through the refresh logic.
-        self.gi_client.session = _AutoRefreshSession(self)
+        # bioblend sends every request through these methods (with plain
+        # `requests`, not a session), so recovery from an expired key wraps them.
+        for name in _REQUEST_METHODS:
+            setattr(self.gi_client, name, _with_key_recovery(self, getattr(self.gi_client, name)))
         self.config_client = galaxy.config.ConfigClient(self.gi_client)
 
     def _refresh_user_key(self) -> str:
@@ -139,15 +134,24 @@ class GalaxyClient:
         if not new_key:
             raise RuntimeError(f"No Galaxy user found for email {self.user_email}")
 
-        # Swap the key in-place and rebuild gi_object so subsequent calls use it
+        # Swap the key in place: managers built on this client keep working.
         self.user_api_key = new_key
-        old_session = self.gi_client.session
-        self.gi_object = GalaxyInstance(url=self.galaxy_url, api_key=new_key)
-        self.gi_client = self.gi_object.gi
-        self.gi_client.session = old_session  # keep the auto-refresh hook
-        self.config_client = galaxy.config.ConfigClient(self.gi_client)
+        self.gi_client._key = new_key
+        self.gi_client.json_headers["x-api-key"] = new_key
         self.logger.info(f"Galaxy API key refreshed for {self.user_email}")
         return new_key
+
+    def _recover_key(self) -> bool:
+        """Switch to the current key once per client; False if that isn't possible."""
+        if self._key_recovered:
+            return False
+        self._key_recovered = True
+        try:
+            self._refresh_user_key()
+            return True
+        except Exception as e:
+            self.logger.warning(f"Auto-refresh failed: {e}")
+            return False
 
     @property
     def whoami(self) -> str:
