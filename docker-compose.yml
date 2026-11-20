@@ -19,8 +19,8 @@ services:
       - MONGO_HOST=mongo
       - MONGO_PORT=${MONGO_PORT}
     ports:
-      - "${APP_PORT}:8895" # Uvicorn
-      - "${MCP_PORT}:8897" # bioblend_server
+      - "127.0.0.1:${APP_PORT}:8895" # Uvicorn
+      - "127.0.0.1:${MCP_PORT}:8897" # bioblend_server
     depends_on:
       - redis
       - qdrant
@@ -39,7 +39,7 @@ services:
     container_name: redis
     command: ["redis-server", "--port", "${REDIS_PORT}"]
     ports:
-      - "${REDIS_PORT}:${REDIS_PORT}"
+      - "127.0.0.1:${REDIS_PORT}:${REDIS_PORT}"
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -52,8 +52,8 @@ services:
       - QDRANT__SERVICE__HTTP_PORT=${QDRANT_HTTP_PORT}
       - QDRANT__SERVICE__GRPC_PORT=${QDRANT_GRPC_PORT}
     ports:
-      - "${QDRANT_HTTP_PORT}:${QDRANT_HTTP_PORT}" # HTTP
-      - "${QDRANT_GRPC_PORT}:${QDRANT_GRPC_PORT}" # gRPC
+      - "127.0.0.1:${QDRANT_HTTP_PORT}:${QDRANT_HTTP_PORT}" # HTTP
+      - "127.0.0.1:${QDRANT_GRPC_PORT}:${QDRANT_GRPC_PORT}" # gRPC
     volumes:
       - vectordata:/qdrant/storage
     restart: unless-stopped
@@ -64,7 +64,7 @@ services:
     container_name: mongo
     command: ["mongod", "--bind_ip_all", "--port", "${MONGO_PORT}"]
     ports:
-      - "${MONGO_PORT}:${MONGO_PORT}"
+      - "127.0.0.1:${MONGO_PORT}:${MONGO_PORT}"
     volumes:
       - mongo_data:/data/db
     restart: unless-stopped

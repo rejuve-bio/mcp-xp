@@ -900,6 +900,34 @@ async def test_download_streams_with_range_and_names_the_file():
     assert response.headers["content-disposition"].startswith('attachment; filename="reads_R1"')
 
 
+@pytest.mark.parametrize("asked, sent", [
+    ("bytes=0-1048575", "bytes=0-19"),  # a 1 MB preview of a 20-byte file gets the whole file (#91)
+    ("bytes=5-9", "bytes=5-9"),         # a range inside the file is left alone
+    ("bytes=5-", "bytes=5-"),           # open-ended and suffix ranges already fit
+    ("bytes=-4", "bytes=-4"),
+    ("bytes=20-30", "bytes=20-30"),     # starts past the end: Galaxy's 416 is right
+])
+async def test_download_shortens_a_range_that_runs_past_the_end(asked, sent):
+    gi = _fake_gi()
+    gi.datasets.show_dataset.return_value = {**gi.datasets.show_dataset.return_value, "file_size": 20}
+    seen = {}
+    response = await datasets.download(_service(gi), "f2db", asked, None, http=_galaxy_display(seen))
+    assert seen["range"] == sent
+    await _read(response)
+
+
+async def test_download_html_gets_the_page_not_a_zip():
+    # With to_ext, Galaxy zips an HTML dataset with its extra files (#90).
+    gi = _fake_gi()
+    gi.datasets.show_dataset.return_value = {**gi.datasets.show_dataset.return_value, "name": "fastp report",
+                                             "extension": "html"}
+    seen = {}
+    response = await datasets.download(_service(gi), "f2db", None, None, http=_galaxy_display(seen, 200))
+    assert seen["url"] == "https://galaxy.example.org/api/datasets/f2db/display"
+    assert 'filename="fastp report"' in response.headers["content-disposition"]
+    await _read(response)
+
+
 async def test_download_index_files_and_errors():
     gi = _fake_gi()
     svc = _service(gi)
