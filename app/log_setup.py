@@ -1,5 +1,7 @@
 import logging
 
+from app import log_redaction
+
 def configure_logging():
 
     root_logger = logging.getLogger()
@@ -14,6 +16,7 @@ def configure_logging():
 
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(stream_handler)
+    log_redaction.install(handlers=[stream_handler])
 
     # Set noisy logs to critical to decrease confusion.
     for noisy_logger in ["bioblend", "requests", "urllib3", "httpx", "neo4j.notifications"]:

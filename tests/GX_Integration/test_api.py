@@ -16,6 +16,7 @@ from sys import path
 path.append(".")
 
 import os
+import time
 
 os.environ["SECRET_KEY"] = (
     "test_secret_key_must_be_long_enough_for_fernet_key_generation_or_mocked"
@@ -62,6 +63,7 @@ def mock_env(monkeypatch, secret_key):
     monkeypatch.setenv("SECRET_KEY", secret_key)
     monkeypatch.setenv("GALAXY_API_KEY", "test-admin-key")
     monkeypatch.setenv("GALAXY_URL", "http://test-galaxy")
+    monkeypatch.setenv("JWT_SECRET", "test-jwt-secret-0123456789abcdef0123456789")
     monkeypatch.setenv("REDIS_HOST", "localhost")
     monkeypatch.setenv("REDIS_PORT", "6379")
     logger.info("mock_env setup complete")
@@ -116,8 +118,8 @@ def auth_headers(mock_fernet):
 
     inner_payload = json.dumps({"apikey": "test_user_key"})
     encrypted = mock_fernet.encrypt(inner_payload.encode()).decode()
-    jwt_payload = {"galaxy_api_token": encrypted}
-    token = jwt.encode(jwt_payload, key=None, algorithm="none")
+    jwt_payload = {"galaxy_api_token": encrypted, "exp": int(time.time()) + 300}
+    token = jwt.encode(jwt_payload, os.environ["JWT_SECRET"], algorithm="HS256")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -221,290 +223,8 @@ def client(mock_env, mock_import_workflows, mock_galaxy_client, mock_workflow_ma
     logger.info("client fixture teardown complete")
 
 
-class TestRegisterUserEndpoint:
-    """Unit tests for the /register-user endpoint."""
-
-    def test_register_user_new_user_success(self, client, mock_fernet, caplog):
-        """Test successful registration of a new user."""
-        logger.info("TEST: test_register_user_new_user_success starting")
-        caplog.set_level(logging.INFO)
-        client.mock_import_workflows.reset_mock()
-
-        with (
-            patch("app.main.fernet", new=mock_fernet),
-            patch("app.main.GALAXY_URL", "http://test-galaxy"),
-        ):
-            logger.debug("fernet patched")
-            with patch("httpx.AsyncClient") as mock_httpx:
-                logger.debug("httpx.AsyncClient patched")
-                mock_client = AsyncMock()
-                mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-                mock_httpx.return_value.__aexit__ = AsyncMock(return_value=None)
-
-                # Mock the create user response
-                mock_create_resp = MagicMock()
-                mock_create_resp.status_code = 200
-                mock_create_resp.json.return_value = {
-                    "id": "123-id",
-                    "username": "newuser",
-                }
-                mock_create_resp.raise_for_status = MagicMock()
-
-                # Mock the API key response
-                mock_key_resp = MagicMock()
-                mock_key_resp.status_code = 200
-                mock_key_resp.json.return_value = "test_api_key"
-                mock_key_resp.raise_for_status = MagicMock()
-
-                # Set up post to return different responses for each call
-                mock_client.post = AsyncMock(
-                    side_effect=[mock_create_resp, mock_key_resp]
-                )
-                logger.debug("Mocks configured, making request")
-
-                logger.debug("Calling client.post")
-                response = client.post(
-                    "/register-user",
-                    params={
-                        "email": "newuser@example.com",
-                        "password": "securepass123",
-                    },
-                )
-                logger.info(f"Got response: {response.status_code}")
-
-                assert response.status_code == 200
-                data = response.json()
-                assert data["username"] == "newuser"
-
-                decrypted = mock_fernet.decrypt(data["api_token"].encode()).decode()
-                assert json.loads(decrypted) == {"apikey": "test_api_key"}
-
-                # Verify import_published_workflows was called
-                client.mock_import_workflows.assert_called_once_with(
-                    galaxy_url="http://test-galaxy", api_key="test_api_key"
-                )
-
-                # Verify the API calls
-                assert mock_client.post.call_count == 2
-                first_call = mock_client.post.call_args_list[0]
-                assert first_call.kwargs["url"] == "http://test-galaxy/api/users"
-                assert first_call.kwargs["headers"] == {"x-api-key": "test-admin-key"}
-                assert first_call.kwargs["json"]["email"] == "newuser@example.com"
-
-                # Verify endpoint logs
-                assert (
-                    "creating galaxy user account from galaxy service." in caplog.text
-                )
-                assert "Galaxy account created with username newuser" in caplog.text
-                assert (
-                    "Galaxy api-key extracted and encrypted for user with galaxy id 123-id"
-                    in caplog.text
-                )
-
-                logger.info("TEST: test_register_user_new_user_success PASSED")
-
-    def test_register_user_existing_user_success(self, client, mock_fernet, caplog):
-        """Test successful registration when user already exists (fetches existing)."""
-        logger.info("TEST: test_register_user_existing_user_success starting")
-        caplog.set_level(logging.INFO)
-        client.mock_import_workflows.reset_mock()
-
-        with (
-            patch("app.main.fernet", new=mock_fernet),
-            patch("app.main.GALAXY_URL", "http://test-galaxy"),
-        ):
-            with patch("httpx.AsyncClient") as mock_httpx:
-                mock_client = AsyncMock()
-                mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-                mock_httpx.return_value.__aexit__ = AsyncMock(return_value=None)
-
-                # Mock the failed create user response (400)
-                mock_bad_resp = MagicMock()
-                mock_bad_resp.status_code = 400
-                create_error = httpx.HTTPStatusError(
-                    message="Bad Request", request=MagicMock(), response=mock_bad_resp
-                )
-                mock_bad_resp.raise_for_status = MagicMock(side_effect=create_error)
-
-                # Mock the get user response
-                mock_get_resp = MagicMock()
-                mock_get_resp.status_code = 200
-                mock_get_resp.json.return_value = [
-                    {"id": "456-id", "username": "existing"}
-                ]
-                mock_get_resp.raise_for_status = MagicMock()
-
-                # Mock the API key response
-                mock_key_resp = MagicMock()
-                mock_key_resp.status_code = 200
-                mock_key_resp.json.return_value = "test_api_key"
-                mock_key_resp.raise_for_status = MagicMock()
-
-                # Set up responses
-                mock_client.post = AsyncMock(side_effect=[mock_bad_resp, mock_key_resp])
-                mock_client.get = AsyncMock(return_value=mock_get_resp)
-
-                logger.debug("Making request for existing user")
-                response = client.post(
-                    "/register-user",
-                    params={
-                        "email": "existing@example.com",
-                        "password": "securepass123",
-                    },
-                )
-                logger.info(f"Got response: {response.status_code}")
-
-                assert response.status_code == 200
-                data = response.json()
-                assert data["username"] == "existing"
-
-                decrypted = mock_fernet.decrypt(data["api_token"].encode()).decode()
-                assert json.loads(decrypted) == {"apikey": "test_api_key"}
-
-                # Verify import_published_workflows was called
-                client.mock_import_workflows.assert_called_once_with(
-                    galaxy_url="http://test-galaxy", api_key="test_api_key"
-                )
-
-                # Verify the get call
-                mock_client.get.assert_called_once()
-
-                # Verify endpoint logs
-                assert (
-                    "creating galaxy user account from galaxy service." in caplog.text
-                )
-                assert "account already exists, getting api." in caplog.text
-                assert "Galaxy User fetched with username existing" in caplog.text
-                assert (
-                    "Galaxy api-key extracted and encrypted for user with galaxy id 456-id"
-                    in caplog.text
-                )
-
-                logger.info("TEST: test_register_user_existing_user_success PASSED")
-
-    def test_register_user_unauthorized_error(self, client, caplog):
-        """Test 401 unauthorized error from Galaxy admin API."""
-        logger.info("TEST: test_register_user_unauthorized_error starting")
-        caplog.set_level(logging.ERROR)
-        client.mock_import_workflows.reset_mock()
-
-        with patch("httpx.AsyncClient") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=None)
-
-            # Mock unauthorized response
-            mock_bad_resp = MagicMock()
-            mock_bad_resp.status_code = 401
-            create_error = httpx.HTTPStatusError(
-                message="Unauthorized", request=MagicMock(), response=mock_bad_resp
-            )
-            mock_bad_resp.raise_for_status = MagicMock(side_effect=create_error)
-            mock_client.post = AsyncMock(return_value=mock_bad_resp)
-
-            logger.debug("Making unauthorized request")
-            response = client.post(
-                "/register-user",
-                params={"email": "unauth@example.com", "password": "pass"},
-            )
-            logger.info(f"Got response: {response.status_code}")
-
-            assert response.status_code == 401
-            assert "Unauthorized admin id" in response.json()["detail"]
-
-            # import_published_workflows should NOT be called on error
-            client.mock_import_workflows.assert_not_called()
-
-            # Verify endpoint logs
-            assert "Unauthorized admin id" in caplog.text
-
-            logger.info("TEST: test_register_user_unauthorized_error PASSED")
-
-    def test_register_user_generic_error(self, client, caplog):
-        """
-        Test generic server error (e.g., 500 from Galaxy).
-        """
-        logger.info("TEST: test_register_user_generic_error starting")
-        caplog.set_level(logging.INFO)
-        client.mock_import_workflows.reset_mock()
-
-        with patch("app.main.httpx.AsyncClient") as mock_async_client_cls:
-            mock_instance = AsyncMock()
-            mock_async_client_cls.return_value.__aenter__.return_value = mock_instance
-
-            mock_resp = MagicMock()
-            mock_resp.status_code = 500
-            mock_resp.json = MagicMock(return_value={})
-
-            mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-                message="Internal Server Error",
-                request=MagicMock(),
-                response=mock_resp,
-            )
-
-            mock_instance.post.return_value = mock_resp
-
-            # The app catches InternalServerErrorException and returns a 500 response.
-            response = client.post(
-                "/register-user",
-                params={"email": "error@example.com", "password": "pass"},
-            )
-
-            # Expect a 500 HTTP status code
-            assert response.status_code == 500
-            client.mock_import_workflows.assert_not_called()
-
-            # Verify endpoint logs
-            assert "creating galaxy user account from galaxy service." in caplog.text
-            logger.info("TEST: test_register_user_generic_error PASSED")
-
-    def test_register_user_api_key_creation_fails(self, client, caplog):
-        """Test when user is created/fetched but API key creation fails."""
-        logger.info("TEST: test_register_user_api_key_creation_fails starting")
-        caplog.set_level(logging.ERROR)
-        client.mock_import_workflows.reset_mock()
-
-        with patch("httpx.AsyncClient") as mock_httpx:
-            mock_client = AsyncMock()
-            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=None)
-
-            # Mock successful user creation
-            mock_create_resp = MagicMock()
-            mock_create_resp.status_code = 200
-            mock_create_resp.json.return_value = {
-                "id": "123-id",
-                "username": "testuser",
-            }
-            mock_create_resp.raise_for_status = MagicMock()
-
-            # Mock failed API key creation
-            mock_key_resp = MagicMock()
-            mock_key_resp.status_code = 500
-            key_error = httpx.HTTPStatusError(
-                message="Internal Server Error",
-                request=MagicMock(),
-                response=mock_key_resp,
-            )
-            mock_key_resp.raise_for_status = MagicMock(side_effect=key_error)
-
-            mock_client.post = AsyncMock(side_effect=[mock_create_resp, mock_key_resp])
-
-            logger.info("Making request that should fail on API key creation")
-            # This should raise an exception because API key creation fails
-            with pytest.raises(Exception):
-                client.post(
-                    "/register-user",
-                    params={
-                        "email": "newuser@example.com",
-                        "password": "securepass123",
-                    },
-                )
-            logger.info("Exception raised as expected")
-
-            # import_published_workflows should NOT be called on error
-            client.mock_import_workflows.assert_not_called()
-            logger.info("TEST: test_register_user_api_key_creation_fails PASSED")
+# /register-user, /refresh-galaxy-key and /v1/users/me/galaxy-api-key are
+# covered against a fake Galaxy in test_auth.py.
 
 
 class TestInvocationList:

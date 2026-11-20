@@ -13,6 +13,9 @@ from starlette.concurrency import run_in_threadpool
 from app.orchestration.invocation_cache import InvocationCache
 from app.enumerations import NumericLimits
 from app.galaxy import GalaxyClient
+from app.auth.galaxy_accounts import GalaxyAccountError
+from app.auth.identity import identify
+from app.auth.tokens import TokenError
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
 
 load_dotenv()
@@ -125,12 +128,19 @@ class InvocationBackgroundTasks:
         """Warm cache for a specific user"""
         
         try:
-            # Decode JWT to extract the Api key
+            # The active-user set records every bearer token the rate limiter
+            # saw, including ones the JWT middleware then rejected; only warm
+            # caches for tokens that still pass the same checks.
+            user_email = None
             if not api_key:
-                encrypted_api_key = jwt.decode(token, options={"verify_signature": False}).get(GALAXY_API_TOKEN)
-                api_key = await self._decrypt_api_token(encrypted_api_key)
-            
-            galaxy_client = GalaxyClient(api_key)
+                try:
+                    identity = await identify(token, create_account=False)
+                except (TokenError, GalaxyAccountError) as e:
+                    self.log.debug(f"Skipping cache warm for an unusable token: {e}")
+                    return
+                api_key, user_email = identity.api_key, identity.email
+
+            galaxy_client = GalaxyClient(api_key, user_email=user_email)
             username = galaxy_client.whoami
             
             # Avoid warming cache for the same user too frequently

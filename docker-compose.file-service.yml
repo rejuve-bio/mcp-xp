@@ -1,0 +1,16 @@
+# Dev host only: also attach mcp-app to the file service's Docker network, so
+# the file service reaches it at http://mcp-app:8895 (Galaxy listings and
+# POST /v1/datasets/import). The network must already exist (the file service
+# creates it); that is why this is not in docker-compose.yml.
+#
+# Use it with the main file, e.g. in that checkout's .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.file-service.yml
+# or: docker compose -f docker-compose.yml -f docker-compose.file-service.yml up -d
+services:
+  app:
+    networks:
+      - file-service-net
+
+networks:
+  file-service-net:
+    external: true
