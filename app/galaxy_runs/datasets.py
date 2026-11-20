@@ -26,6 +26,20 @@ INDEX_SUFFIX = {"bam_index": "bai", "tabix_index": "tbi"}
 PASS_THROUGH = ("content-type", "content-length", "content-range", "accept-ranges", "content-encoding",
                 "last-modified", "etag")
 METADATA_FILE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+PAGE_FORMATS = {"html"}
+_BYTE_RANGE = re.compile(r"^bytes=(\d+)-(\d+)$")
+
+
+def _fit_range(range_header: str, size: Any) -> str:
+    """Shorten 'bytes=a-b' to end at the file's last byte. Galaxy answers 416 to a range that runs past the
+    end, though the start is inside the file (a 1 MB preview of a small file). Anything else is left as asked."""
+    m = _BYTE_RANGE.match(range_header.strip())
+    if not m or not isinstance(size, int) or size <= 0:
+        return range_header
+    start, end = int(m.group(1)), int(m.group(2))
+    if start >= size or end < size:
+        return range_header
+    return f"bytes={start}-{size - 1}"
 
 HttpFactory = Callable[[], httpx.AsyncClient]
 
@@ -219,13 +233,17 @@ async def download(runs: GalaxyRuns, dataset_id: str, range_header: Optional[str
     if metadata_file:
         url = f"{runs.galaxy_url}/api/datasets/{quote(dataset_id)}/metadata_file?metadata_file={quote(metadata_file)}"
         filename = f"{name}.{INDEX_SUFFIX.get(metadata_file, metadata_file)}"
+    elif ext in PAGE_FORMATS:
+        # With to_ext Galaxy zips an HTML dataset with its extra files; without it, Galaxy sends the page.
+        url = f"{runs.galaxy_url}/api/datasets/{quote(dataset_id)}/display"
+        filename = name
     else:
         url = f"{runs.galaxy_url}/api/datasets/{quote(dataset_id)}/display?to_ext={quote(ext)}"
         filename = name  # the dataset's name, as the spec says
 
     headers = {"x-api-key": runs.client.user_api_key}
     if range_header:
-        headers["Range"] = range_header
+        headers["Range"] = _fit_range(range_header, dataset.get("file_size"))
     client = (http or _default_http)()
     try:
         upstream = await client.send(client.build_request("GET", url, headers=headers), stream=True)
