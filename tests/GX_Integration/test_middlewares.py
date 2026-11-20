@@ -62,135 +62,91 @@ def test_app():
         return {"status": "ok"}
     
     return app
+JWT_TEST_SECRET = "test-jwt-secret-0123456789abcdef0123456789"
+
+
+def signed_token(claims: dict, secret: str = JWT_TEST_SECRET, exp_in: int = 300) -> str:
+    claims = {"exp": int(datetime.now().timestamp()) + exp_in, **claims}
+    return jwt.encode(claims, secret, algorithm="HS256")
+
+
 class TestJWTGalaxyKeyMiddleware:
-    """Unit tests for JWTGalaxyKeyMiddleware."""
-    
+    """REST middleware: only tokens signed by the auth service get through."""
+
     @pytest.fixture
-    def app_with_jwt_middleware(self, test_app, fernet_secret,jwt_logger):
-        """App with JWT middleware added."""
-        jwt_logger.debug("Setting up app_with_jwt_middleware")
-        os.environ["SECRET_KEY"] = fernet_secret.decode()  # Set env for middleware init
+    def app_with_jwt_middleware(self, test_app, fernet_secret, monkeypatch):
+        monkeypatch.setenv("SECRET_KEY", fernet_secret.decode())
+        monkeypatch.setenv("JWT_SECRET", JWT_TEST_SECRET)
+        monkeypatch.delenv("JWT_VERIFY", raising=False)
         test_app.add_middleware(JWTGalaxyKeyMiddleware)
-        client = FastAPITestClient(test_app)
-        jwt_logger.debug("app_with_jwt_middleware setup complete")
-        yield client
-        del os.environ["SECRET_KEY"]
-        jwt_logger.debug("app_with_jwt_middleware teardown complete")
-    
-    def test_public_paths_allowed_without_auth(self, app_with_jwt_middleware, caplog, jwt_logger):
-        """Test that public paths are allowed without authorization."""
-        jwt_logger.info("TEST: test_public_paths_allowed_without_auth starting")
-        caplog.set_level(logging.INFO)
-        jwt_logger.debug("Making request to public path /")
+        yield FastAPITestClient(test_app)
+
+    def _get(self, client, token):
+        return client.get("/protected", headers={"Authorization": f"Bearer {token}"})
+
+    def test_public_paths_allowed_without_auth(self, app_with_jwt_middleware):
         response = app_with_jwt_middleware.get("/")
         assert response.status_code == 200
-        assert "api_key" in response.json()
-        jwt_logger.info("TEST: test_public_paths_allowed_without_auth PASSED")
 
-    def test_missing_authorization_header(self, app_with_jwt_middleware, caplog, jwt_logger):
-        """Test 401 response for missing Authorization header."""
-        jwt_logger.info("TEST: test_missing_authorization_header starting")
-        caplog.set_level(logging.ERROR)
-        jwt_logger.debug("Making request without Authorization header to /protected")
+    def test_missing_authorization_header(self, app_with_jwt_middleware):
         response = app_with_jwt_middleware.get("/protected")
         assert response.status_code == HTTP_401_UNAUTHORIZED
         assert response.json()["detail"] == "Authorization header with Bearer token is required."
-        jwt_logger.info("TEST: test_missing_authorization_header PASSED")
+        assert response.headers["WWW-Authenticate"] == "Bearer"
 
-    def test_invalid_jwt_token(self, app_with_jwt_middleware, caplog, jwt_logger):
-        """Test 401 response for invalid JWT token."""
-        jwt_logger.info("TEST: test_invalid_jwt_token starting")
-        caplog.set_level(logging.ERROR)
-        invalid_token = "invalid.token.here"
-        jwt_logger.debug(f"Making request with invalid token: {invalid_token} to /protected")
-        response = app_with_jwt_middleware.get(
-            "/protected",
-            headers={"Authorization": f"Bearer {invalid_token}"}
-        )
+    def test_malformed_token(self, app_with_jwt_middleware):
+        response = self._get(app_with_jwt_middleware, "invalid.token.here")
         assert response.status_code == HTTP_401_UNAUTHORIZED
-        assert "Invalid JWT" in response.json()["detail"]
-        assert "Invalid JWT" in caplog.text
-        jwt_logger.info("TEST: test_invalid_jwt_token PASSED")
+        assert response.headers["WWW-Authenticate"] == 'Bearer error="invalid_token"'
 
-    def test_jwt_missing_galaxy_api_token_claim(self, app_with_jwt_middleware, caplog, jwt_logger):
-        """Test 401 response for JWT missing the required claim."""
-        jwt_logger.info("TEST: test_jwt_missing_galaxy_api_token_claim starting")
-        caplog.set_level(logging.ERROR)
-        payload = {"other_claim": "value"}
-        token = jwt.encode(payload, key=None, algorithm="none")
-        jwt_logger.debug(f"Making request with missing claim token: {token} to /protected")
-        response = app_with_jwt_middleware.get(
-            "/protected",
-            headers={"Authorization": f"Bearer {token}"}
-        )
+    def test_unsigned_token_rejected(self, app_with_jwt_middleware):
+        token = jwt.encode({"galaxy_api_token": "raw-key"}, key=None, algorithm="none")
+        assert self._get(app_with_jwt_middleware, token).status_code == HTTP_401_UNAUTHORIZED
+
+    def test_token_signed_with_other_secret_rejected(self, app_with_jwt_middleware, fernet):
+        claim = fernet.encrypt(json.dumps({"apikey": "k"}).encode()).decode()
+        token = signed_token({"galaxy_api_token": claim}, secret="attacker-secret-0123456789abcdef01")
+        response = self._get(app_with_jwt_middleware, token)
         assert response.status_code == HTTP_401_UNAUTHORIZED
-        assert "JWT missing required claim" in response.json()["detail"]
-        jwt_logger.info("TEST: test_jwt_missing_galaxy_api_token_claim PASSED")
+        assert "signature" in response.json()["detail"]
 
-    def test_jwt_with_empty_galaxy_api_token_claim(self, app_with_jwt_middleware, caplog, jwt_logger):
-        """Test 401 response for empty galaxy_api_token claim."""
-        jwt_logger.info("TEST: test_jwt_with_empty_galaxy_api_token_claim starting")
-        caplog.set_level(logging.ERROR)
-        payload = {"galaxy_api_token": ""}
-        token = jwt.encode(payload, key=None, algorithm="none")
-        jwt_logger.debug(f"Making request with empty claim token: {token} to /protected")
-        response = app_with_jwt_middleware.get(
-            "/protected",
-            headers={"Authorization": f"Bearer {token}"}
-        )
+    def test_expired_token_rejected(self, app_with_jwt_middleware, fernet):
+        claim = fernet.encrypt(json.dumps({"apikey": "k"}).encode()).decode()
+        token = signed_token({"galaxy_api_token": claim}, exp_in=-3600)
+        response = self._get(app_with_jwt_middleware, token)
         assert response.status_code == HTTP_401_UNAUTHORIZED
-        assert "API key claim is empty." == response.json()["detail"]
-        jwt_logger.info("TEST: test_jwt_with_empty_galaxy_api_token_claim PASSED")
+        assert "expired" in response.json()["detail"]
 
-    def test_jwt_with_raw_api_key_claim(self, app_with_jwt_middleware, caplog,jwt_logger):
-        """Test successful handling of raw API key in claim."""
-        jwt_logger.info("TEST: test_jwt_with_raw_api_key_claim starting")
-        caplog.set_level(logging.INFO)
-        raw_apikey = "test-api-key-123"
-        payload = {"galaxy_api_token": raw_apikey}
-        token = jwt.encode(payload, key=None, algorithm="none")
-        jwt_logger.debug(f"Making request with raw apikey token: {token} to /protected")
-        response = app_with_jwt_middleware.get(
-            "/protected",
-            headers={"Authorization": f"Bearer {token}"}
-        )
-        assert response.status_code == 200
-        assert response.json()["api_key"] == raw_apikey
-        jwt_logger.info("TEST: test_jwt_with_raw_api_key_claim PASSED")
+    def test_raw_key_claim_no_longer_accepted(self, app_with_jwt_middleware):
+        token = signed_token({"galaxy_api_token": "raw-galaxy-key"})
+        assert self._get(app_with_jwt_middleware, token).status_code == HTTP_401_UNAUTHORIZED
 
-    def test_jwt_with_encrypted_api_key_claim(self, fernet, app_with_jwt_middleware, caplog, jwt_logger):
-        """Test successful decryption of encrypted API key in claim."""
-        jwt_logger.info("TEST: test_jwt_with_encrypted_api_key_claim starting")
-        caplog.set_level(logging.INFO)
+    def test_signed_token_with_encrypted_key(self, app_with_jwt_middleware, fernet):
         raw_apikey = "test-encrypted-api-key-456"
-        encrypted_payload = json.dumps({"apikey": raw_apikey}).encode()
-        encrypted_token = fernet.encrypt(encrypted_payload)
-        payload = {"galaxy_api_token": encrypted_token.decode()}
-        token = jwt.encode(payload, key=None, algorithm="none")
-        jwt_logger.debug(f"Making request with encrypted apikey token: {token} to /protected")
-        response = app_with_jwt_middleware.get(
-            "/protected",
-            headers={"Authorization": f"Bearer {token}"}
-        )
+        claim = fernet.encrypt(json.dumps({"apikey": raw_apikey}).encode()).decode()
+        response = self._get(app_with_jwt_middleware, signed_token({"galaxy_api_token": claim}))
         assert response.status_code == 200
         assert response.json()["api_key"] == raw_apikey
-        jwt_logger.info("TEST: test_jwt_with_encrypted_api_key_claim PASSED")
 
-    def test_jwt_with_invalid_encrypted_claim_falls_back_to_raw(self, app_with_jwt_middleware, caplog, jwt_logger):
-        """Test fallback to raw claim when decryption fails."""
-        jwt_logger.info("TEST: test_jwt_with_invalid_encrypted_claim_falls_back_to_raw starting")
-        caplog.set_level(logging.INFO)
-        invalid_encrypted = "invalid-encrypted-token"
-        payload = {"galaxy_api_token": invalid_encrypted}
-        token = jwt.encode(payload, key=None, algorithm="none")
-        jwt_logger.debug(f"Making request with invalid encrypted token: {token} to /protected")
-        response = app_with_jwt_middleware.get(
-            "/protected",
-            headers={"Authorization": f"Bearer {token}"}
-        )
-        assert response.status_code == 200
-        assert response.json()["api_key"] == invalid_encrypted
-        jwt_logger.info("TEST: test_jwt_with_invalid_encrypted_claim_falls_back_to_raw PASSED")
+    def test_refresh_galaxy_key_is_not_public(self, test_app, fernet_secret, monkeypatch):
+        monkeypatch.setenv("SECRET_KEY", fernet_secret.decode())
+        monkeypatch.setenv("JWT_SECRET", JWT_TEST_SECRET)
+
+        @test_app.post("/refresh-galaxy-key")
+        async def refresh():
+            return {"api_key": current_api_key.get(None)}
+
+        test_app.add_middleware(JWTGalaxyKeyMiddleware)
+        response = FastAPITestClient(test_app).post("/refresh-galaxy-key?email=a@example.org")
+        assert response.status_code == HTTP_401_UNAUTHORIZED
+
+    def test_startup_fails_without_secret(self, test_app, fernet_secret, monkeypatch):
+        monkeypatch.setenv("SECRET_KEY", fernet_secret.decode())
+        monkeypatch.delenv("JWT_SECRET", raising=False)
+        monkeypatch.delenv("JWT_VERIFY", raising=False)
+        test_app.add_middleware(JWTGalaxyKeyMiddleware)
+        with pytest.raises(RuntimeError, match="JWT_SECRET"):
+            FastAPITestClient(test_app).get("/")
 
 
 class TestRateLimiterMiddleware:

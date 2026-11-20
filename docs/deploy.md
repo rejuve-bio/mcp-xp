@@ -67,6 +67,18 @@ removing the legacy Deployment.
 The self-hosted deployment runner needs `kubectl`, Python 3, `curl`, Docker, and
 network access to the clusters and Docker Hub.
 
+## Required application environment
+
+Each colored Deployment copies the live Deployment's environment, so set these
+once on the active Deployment before the first deploy that needs them:
+
+- `JWT_SECRET`: the `JWT_SECRET_KEY` of the auth service whose login tokens the
+  environment accepts (comma-separate several). Without it the app and the MCP
+  server refuse to start.
+- `JWT_VERIFY`: roll a new environment out with `report` first, check the logs
+  for "would be rejected", then switch to `enforce` (the default). See
+  `.env.example`.
+
 ## Manual operations
 
 Both deployment workflows support **Run workflow** in GitHub Actions.

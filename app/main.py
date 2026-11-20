@@ -41,6 +41,7 @@ from app.api.middleware import (
     )
 from app.api.api import api_router 
 from app.api.endpoints import galaxy_runs
+from app.api.endpoints.accounts import router as accounts_router
 from app.api.socket_manager import ws_manager
 from app.enumerations import SocketMessageEvent
 from app.orchestration.invocation_cache import InvocationCache
@@ -78,11 +79,6 @@ configure_logging()
 
 class MessageRequest(BaseModel):
     message: str
-
-class GalaxyUserAccount(BaseModel):
-    username: str
-    api_token: str
-
 
 APP_DESCRIPTION = """
 - This **FastAPI application** provides a RESTful API for dynamically interacting with the **Galaxy platform** and the **Galaxy Agent**.\n
@@ -259,159 +255,7 @@ async def list_tools(request: Request):
     return {"tools": all_tools}
 
 
-@app.post("/register-user",
-          response_model=GalaxyUserAccount,
-          tags =["Signup Auth"]
-           )
-async def get_create_galaxy_user_and_key(
-    email: str = Query(description="email of the user to be registered to our galaxy instance."),
-    password: str = Query(description="passcode to use for our galaxy isntance.")
-    ) -> tuple[str, str]:
-
-    """ Register Galaxy user from platform using the same credentials   """
-
-    # 1. Create user via admin API
-    username=None
-    api_token=None
-
-    try:
-        logger.info("creating galaxy user account from galaxy service.")
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                url = f"{GALAXY_URL}/api/users",
-                headers={"x-api-key": os.getenv("GALAXY_API_KEY")},
-                json={
-                    "username": email.split("@")[0],  # or whatever scheme you like
-                    "email":    email,
-                    "password": password
-                }
-            )
-                
-        resp.raise_for_status()
-        galaxy_user_id = resp.json()["id"]
-        username= resp.json()["username"]
-        logger.info(f"Galaxy account created with username {username}")
-    
-    except httpx.ConnectError as e:
-        logger.error(f"Error connecting to galaxy instance when generating api: {e}")
-
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 400:
-
-            # Else Fetch user by email if already exists
-            try:
-                logger.info("account already exists, getting api.")
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    resp = await client.get(
-                        f"{GALAXY_URL}/api/users",
-                        headers={"x-api-key": os.getenv("GALAXY_API_KEY")},
-                        params={"f_email": email}
-                    )
-                resp.raise_for_status()
-                users = resp.json()
-                galaxy_user_id = users[0]["id"]
-                username= users[0]["username"]
-                logger.info(f"Galaxy User fetched with username {username}")
-            
-            except httpx.ConnectError as e:
-                logger.error(f"Error connecting to galaxy instance when generating api: {e}")   
-
-            except HTTPException as e: 
-                raise InternalServerErrorException("Error getting/creating galaxy user")
-            except Exception as e:
-                logger.error(f"Error: {e}")
-                raise
-        elif e.response.status_code == HTTP_401_UNAUTHORIZED:
-            logger.error(f"Unauthorized admin id: {e}")
-            raise UnauthorizedException("Unauthorized admin id")
-        else:
-            raise InternalServerErrorException("Error caused during getting api_key for the user")
-
-    except HTTPException as e:
-        logger.error(f"errror creating user acount: {e}")
-        raise InternalServerErrorException("error creating user account")
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        raise
- 
-    # 2. Return generated galaxy api-key
-    try:
-        
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            key_resp = await client.post(
-                url = f"{GALAXY_URL}/api/users/{galaxy_user_id}/api_key",
-                headers={"x-api-key": os.getenv("GALAXY_API_KEY")},
-                json={
-                    "name": "auto-generated from platform"
-                    }
-            )
-
-        key_resp.raise_for_status()
-        api_key = key_resp.json()
-
-        payload = json.dumps({"apikey": api_key}).encode("utf-8")
-        api_token = fernet.encrypt(payload).decode("utf-8")
-        logger.info(f"Galaxy api-key extracted and encrypted for user with galaxy id {galaxy_user_id}")
-
-    except HTTPException as e:
-        logger.error(f"error creating galaxy user api key: {e}")
-        raise InternalServerErrorException("error getting galaxy user api-key")
-    except Exception as e:
-        logger.error(f"Error: {e}")
-
-    # import missing public workflows into the users account.    
-    import_published_workflows(galaxy_url=GALAXY_URL, api_key=api_key)
-
-    return  GalaxyUserAccount(
-        username = username,
-        api_token = api_token
-    )
-
-
-@app.post("/refresh-galaxy-key",
-          response_model=GalaxyUserAccount,
-          tags=["Signup Auth"])
-async def refresh_galaxy_key(
-    email: str = Query(description="Email of the existing Galaxy user whose API key to refresh.")
-) -> GalaxyUserAccount:
-    """Mint a fresh Galaxy API key for an existing user. No password required —
-    uses the admin key to look up the user by email and generate a new key."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            # Look up user by email
-            user_resp = await client.get(
-                f"{GALAXY_URL}/api/users",
-                headers={"x-api-key": os.getenv("GALAXY_API_KEY")},
-                params={"f_email": email}
-            )
-            user_resp.raise_for_status()
-            users = user_resp.json()
-            if not users:
-                logger.error(f"refresh-galaxy-key: no Galaxy user for {email}")
-                raise UnauthorizedException(f"Galaxy user {email} not found")
-            galaxy_user_id = users[0]["id"]
-            username = users[0]["username"]
-
-            # Mint new API key
-            key_resp = await client.post(
-                f"{GALAXY_URL}/api/users/{galaxy_user_id}/api_key",
-                headers={"x-api-key": os.getenv("GALAXY_API_KEY")},
-                json={"name": "refresh"}
-            )
-            key_resp.raise_for_status()
-            api_key = key_resp.json()
-
-        # Encrypt with Fernet (same format as register-user)
-        payload = json.dumps({"apikey": api_key}).encode("utf-8")
-        api_token = fernet.encrypt(payload).decode("utf-8")
-        logger.info(f"refresh-galaxy-key: fresh API key issued for {username}")
-        return GalaxyUserAccount(username=username, api_token=api_token)
-
-    except UnauthorizedException:
-        raise
-    except Exception as e:
-        logger.error(f"refresh-galaxy-key failed for {email}: {e}")
-        raise InternalServerErrorException("Failed to refresh Galaxy API key")
+app.include_router(accounts_router)
 
 
 @app.post("/galaxy_auth",
