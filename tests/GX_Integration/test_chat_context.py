@@ -51,7 +51,8 @@ def test_validate_chat_id_max_length_boundary_ok():
 # ---------- JWTGalaxyKeyMiddleware sets current_chat_id ------------------------
 
 @pytest.fixture
-def middleware_client():
+def middleware_client(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "chat-context-test-secret-0123456789abcdef")
     fernet_secret = Fernet.generate_key()
     os.environ["SECRET_KEY"] = fernet_secret.decode()
 
@@ -64,8 +65,14 @@ def middleware_client():
     app.add_middleware(JWTGalaxyKeyMiddleware)
     client = FastAPITestClient(app)
 
+    import time
     import jwt as _jwt
-    token = _jwt.encode({"galaxy_api_token": "raw-key"}, key=None, algorithm="none")
+    from app.auth.identity import encrypt_api_key
+    token = _jwt.encode(
+        {"galaxy_api_token": encrypt_api_key("user-key"), "exp": int(time.time()) + 300},
+        "chat-context-test-secret-0123456789abcdef",
+        algorithm="HS256",
+    )
 
     yield client, token
     del os.environ["SECRET_KEY"]
