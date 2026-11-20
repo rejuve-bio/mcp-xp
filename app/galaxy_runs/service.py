@@ -372,6 +372,8 @@ class GalaxyRuns:
             else:
                 detecting = item["state"] not in FILE_READY | FILE_FAILED and c.get("extension") in FORMAT_PLACEHOLDERS
                 item["format"] = "auto" if detecting and not galaxy_formats else c.get("extension")
+                build = c.get("genome_build")
+                item["genome_build"] = None if build in (None, "", "?") else build  # Galaxy writes "?" for unset
             items.append(item)
         return {"items": items, "next_cursor": None}
 

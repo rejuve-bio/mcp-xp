@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import DEFAULT, MagicMock
 from urllib.parse import unquote
 
+import asyncio
 import pytest
 from bioblend import ConnectionError as GalaxyConnectionError
 
@@ -367,6 +368,31 @@ async def test_thread_files_say_auto_while_galaxy_is_still_detecting_the_format(
     await svc.thread_history("t1")
     files = await svc.thread_files("t1")
     assert [f["format"] for f in files["items"]] == ["auto", "auto", "fastqsanger", "data", "fastqsanger"]
+
+
+GENOME_BUILD_CONTENTS = [
+    {"id": "d1", "hid": 1, "state": "ok", "extension": "bam", "genome_build": "hg38"},
+    {"id": "d2", "hid": 2, "state": "ok", "extension": "txt", "genome_build": "?"},  # Galaxy's "not set"
+    {"id": "d3", "hid": 3, "state": "ok", "extension": "vcf"},
+    {"id": "c1", "hid": 4, "history_content_type": "dataset_collection", "collection_type": "paired",
+     "populated_state": "ok"},
+]
+
+
+async def test_thread_files_carry_the_genome_build():
+    # The file service records a Galaxy output's build from here (#95).
+    svc = _service(_history_contents(_fake_gi(), GENOME_BUILD_CONTENTS))
+    await svc.thread_history("t1")
+    files = (await svc.thread_files("t1"))["items"]
+    assert [f.get("genome_build") for f in files] == ["hg38", None, None, None]
+
+
+def test_thread_files_route_returns_the_genome_build():
+    # The response model must carry the field, or FastAPI drops it.
+    svc = _service(_history_contents(_fake_gi(), GENOME_BUILD_CONTENTS))
+    asyncio.run(svc.thread_history("t1"))
+    items = _client(svc).get("/v1/galaxy/threads/t1/files").json()["items"]
+    assert items[0]["genome_build"] == "hg38" and items[1]["genome_build"] is None
 
 
 # ---------------------------------------------------------------- workflow inputs by Galaxy label
