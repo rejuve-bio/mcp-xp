@@ -213,6 +213,36 @@ class Link(BaseModel):
     not_carried: List[str] = Field(..., description="Paths the link can't hold; the details panel marks them 'Set in Galaxy'")
 
 
+class ImportRequest(BaseModel):
+    """What the file service sends to deliver a file by link."""
+    thread_id: Id
+    url: str = Field(..., max_length=4096, pattern=r"^https?://\S+$",
+                     description="A link Galaxy can fetch from; it carries a token, so it is never logged or stored")
+    name: str = Field(..., min_length=1, max_length=255)
+    deferred: bool = Field(True, description="Galaxy keeps only the link and fetches the bytes when a job needs them")
+    client_request_id: Id = Field(..., description="Same id, same dataset: a retry never makes a second one")
+    sha256: Optional[str] = Field(None, pattern=r"^[0-9a-fA-F]{64}$", description="Galaxy checks each download against it")
+    format: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9_.\-]{1,64}$",
+                                  description="Galaxy format, e.g. tabular; Galaxy guesses from the name when left out")
+
+    model_config = ConfigDict(json_schema_extra={"example": {
+        "thread_id": THREAD, "url": "http://127.0.0.1:18800/v1/links/<token>/sample.tsv", "name": "sample.tsv",
+        "deferred": True, "client_request_id": "d_5f1c0e9a2b7d4c3e8a6f1b2c3d4e5f60",
+        "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "format": "tabular"}})
+
+
+class ImportedDataset(BaseModel):
+    id: str
+    name: str
+    state: Optional[str] = Field(None, description="'deferred' until a job needs it, as Galaxy reports it")
+    format: str = Field(..., description="The given format, Galaxy's guess, or 'auto'")
+    history_id: str
+
+    model_config = ConfigDict(json_schema_extra={"example": {
+        "id": "f2db41e1fa331b3e", "name": "sample.tsv", "state": "deferred", "format": "tabular",
+        "history_id": "1cd8e2f6b131e891"}})
+
+
 class Dataset(BaseModel):
     id: str
     name: str

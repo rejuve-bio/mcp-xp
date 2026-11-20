@@ -90,5 +90,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """/v1 answers an invalid body with 400, keeping 422 for inputs Galaxy rejects."""
     if request.url.path.startswith("/v1/"):
-        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
+        # Without the rejected values: some carry secrets, such as an import link's token.
+        errors = [{k: v for k, v in e.items() if k != "input"} for e in exc.errors()]
+        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(errors)})
     return await request_validation_exception_handler(request, exc)

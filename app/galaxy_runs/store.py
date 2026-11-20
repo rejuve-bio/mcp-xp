@@ -11,6 +11,7 @@ from app.persistence import MongoStore
 HISTORIES = CollectionNames.GALAXY_THREAD_HISTORIES.value
 RUNS = CollectionNames.GALAXY_RUNS.value
 REQUESTS = CollectionNames.GALAXY_RUN_REQUESTS.value
+IMPORTS = CollectionNames.GALAXY_DATASET_IMPORTS.value
 
 
 class RunStore:
@@ -57,3 +58,19 @@ class RunStore:
     async def release_request(self, username: str, client_request_id: str) -> None:
         """Forget a request whose start failed, so a retry can start it."""
         await self.mongo.delete(REQUESTS, f"{username}:{client_request_id}")
+
+    # ---- imports by link (retries); the link itself is never stored ----
+
+    async def claim_import(self, username: str, client_request_id: str, claimed_at: float) -> bool:
+        return await self.mongo.set_if_absent(IMPORTS, f"{username}:{client_request_id}",
+                                              {"dataset": None, "claimed_at": claimed_at})
+
+    async def get_import(self, username: str, client_request_id: str) -> Optional[Dict[str, Any]]:
+        return await self.mongo.get(IMPORTS, f"{username}:{client_request_id}")
+
+    async def save_import(self, username: str, client_request_id: str, dataset: Dict[str, Any]) -> None:
+        await self.mongo.set(IMPORTS, f"{username}:{client_request_id}", {"dataset": dataset})
+
+    async def release_import(self, username: str, client_request_id: str) -> None:
+        """Forget an import that made nothing, so a retry can make it."""
+        await self.mongo.delete(IMPORTS, f"{username}:{client_request_id}")

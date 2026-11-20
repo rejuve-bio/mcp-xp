@@ -180,6 +180,22 @@ class MemoryStore:
     async def release_request(self, u, c):
         self.requests.pop((u, c), None)
 
+    async def claim_import(self, u, c, claimed_at):
+        if ("import", u, c) in self.requests:
+            return False
+        self.requests[("import", u, c)] = {"dataset": None, "claimed_at": claimed_at}
+        return True
+
+    async def get_import(self, u, c):
+        record = self.requests.get(("import", u, c))
+        return dict(record) if record is not None else None
+
+    async def save_import(self, u, c, dataset):
+        self.requests[("import", u, c)] = {"dataset": dict(dataset)}
+
+    async def release_import(self, u, c):
+        self.requests.pop(("import", u, c), None)
+
 
 OWNERS = {"hist1": "alice", "hist-bob": "bob"}  # who owns each history in the fake Galaxy
 
@@ -895,3 +911,135 @@ def test_upload_and_download_routes(monkeypatch):
     down = client.get("/v1/datasets/f2db/download", headers={"Range": "bytes=0-3"})
     assert down.status_code == 206 and down.content == b"ACGT"
     assert client.get("/v1/datasets/f2db/download", params={"metadata_file": "BAD!"}).status_code == 400
+
+
+# ---------------------------------------------------------------- /v1/datasets/import (#74)
+
+LINK = "http://127.0.0.1:18800/v1/links/SECRETTOKEN123/sample.tsv"
+SHA = "a" * 64
+
+
+def _galaxy_fetch_json(gi, state="deferred", ext="tabular"):
+    gi.make_post_request.return_value = {
+        "outputs": [{"id": "ds7", "name": "sample.tsv", "state": state, "extension": ext}], "jobs": [{"id": "j7"}]}
+
+
+async def test_import_makes_a_deferred_dataset_from_the_link():
+    gi = _fake_gi()
+    _galaxy_fetch_json(gi)
+    svc = _service(gi)
+    dataset, repeat = await svc.import_dataset("t1", LINK, "sample.tsv", True, "d_1", SHA, "tabular")
+
+    assert repeat is False
+    assert dataset == {"id": "ds7", "name": "sample.tsv", "state": "deferred", "format": "tabular",
+                       "history_id": "hist1"}
+    url, = gi.make_post_request.call_args.args
+    payload = gi.make_post_request.call_args.kwargs["payload"]
+    assert url == "https://galaxy.example.org/api/tools/fetch"
+    assert payload["history_id"] == "hist1"
+    element, = payload["targets"][0]["elements"]
+    assert payload["targets"][0]["destination"] == {"type": "hdas"}
+    assert element == {"src": "url", "url": LINK, "name": "sample.tsv", "ext": "tabular", "deferred": True,
+                       "hashes": [{"hash_function": "SHA-256", "hash_value": SHA}]}
+
+
+async def test_a_repeated_import_returns_the_first_dataset_and_makes_no_second():
+    gi = _fake_gi()
+    _galaxy_fetch_json(gi)
+    store = MemoryStore()
+    svc = _service(gi, store)
+    first, _ = await svc.import_dataset("t1", LINK, "sample.tsv", True, "d_1", SHA, None)
+    again, repeat = await svc.import_dataset("t1", LINK, "sample.tsv", True, "d_1", SHA, None)
+    assert repeat is True and again == first
+    assert gi.make_post_request.call_count == 1
+
+    # the same request id from another user is that user's own request
+    gi.histories.create_history.return_value = {"id": "hist-bob"}
+    _, repeat = await _service(gi, store, "bob").import_dataset("t1", LINK, "sample.tsv", True, "d_1", SHA, None)
+    assert repeat is False and gi.make_post_request.call_count == 2
+
+
+@pytest.mark.parametrize("galaxy_code,status", [(400, 422), (403, 422), (404, 422), (500, 502)])
+async def test_a_refused_import_never_shows_the_link_and_can_be_retried(galaxy_code, status, caplog):
+    gi = _fake_gi()
+    gi.make_post_request.side_effect = GalaxyConnectionError(
+        "no", body=f'{{"err_msg": "Invalid URL {LINK} for this server"}}', status_code=galaxy_code)
+    svc = _service(gi)
+    with pytest.raises(GalaxyRunsError) as e:
+        await svc.import_dataset("t1", LINK, "sample.tsv", True, "d_1", None, None)
+    assert e.value.status_code == status
+    assert "SECRETTOKEN123" not in str(e.value.detail) and "SECRETTOKEN123" not in caplog.text
+    if galaxy_code == 400:
+        assert "Invalid URL" in e.value.detail  # Galaxy's own reason still reaches the user
+
+    gi.make_post_request.side_effect = None
+    _galaxy_fetch_json(gi)
+    _, repeat = await svc.import_dataset("t1", LINK, "sample.tsv", True, "d_1", None, None)
+    assert repeat is False  # nothing was made, so the same request id may try again
+
+
+def test_import_route_answers_201_then_200_and_never_echoes_the_link():
+    gi = _fake_gi()
+    _galaxy_fetch_json(gi)
+    client = _client(_service(gi))
+    body = {"thread_id": "t1", "url": LINK, "name": "sample.tsv", "deferred": True,
+            "client_request_id": "d_" + "0" * 32, "sha256": SHA, "format": "tabular"}
+
+    first = client.post("/v1/datasets/import", json=body)
+    assert first.status_code == 201
+    assert first.json() == {"id": "ds7", "name": "sample.tsv", "state": "deferred", "format": "tabular",
+                            "history_id": "hist1"}
+    again = client.post("/v1/datasets/import", json=body)
+    assert again.status_code == 200 and again.json() == first.json()
+
+    # sha256 and format may be null, as the file service sends them
+    assert client.post("/v1/datasets/import",
+                       json={**body, "client_request_id": "d_2", "sha256": None}).status_code == 201
+
+    for bad in ({**body, "url": LINK.replace("http://", "ftp://")}, {**body, "sha256": "nothex"},
+                {k: v for k, v in body.items() if k != "client_request_id"}, {**body, "format": "a b"}):
+        refused = client.post("/v1/datasets/import", json=bad)
+        assert refused.status_code == 400
+        assert "SECRETTOKEN123" not in refused.text
+
+
+async def test_galaxy_making_no_dataset_is_502_and_lets_the_request_try_again():
+    gi = _fake_gi()
+    gi.make_post_request.return_value = {"outputs": [], "jobs": []}
+    svc = _service(gi)
+    with pytest.raises(GalaxyRunsError) as e:
+        await svc.import_dataset("t1", LINK, "sample.tsv", True, "d_1", None, None)
+    assert e.value.status_code == 502
+    _galaxy_fetch_json(gi)
+    _, repeat = await svc.import_dataset("t1", LINK, "sample.tsv", True, "d_1", None, None)
+    assert repeat is False
+
+
+async def test_an_import_left_pending_by_a_crash_is_taken_over_after_a_while(monkeypatch):
+    from app.galaxy_runs import service as service_module
+    gi = _fake_gi()
+    _galaxy_fetch_json(gi)
+    svc = _service(gi)
+    await svc.store.claim_import("alice", "d_1", 1000.0)  # a request that died before saving
+    monkeypatch.setattr(service_module.time, "time", lambda: 1000.0 + service_module.IMPORT_STALE_SECONDS + 1)
+    dataset, repeat = await svc.import_dataset("t1", LINK, "sample.tsv", True, "d_1", None, None)
+    assert repeat is False and dataset["id"] == "ds7"
+
+
+@pytest.mark.parametrize("galaxy_code", [403, 404])
+async def test_import_never_answers_404_even_when_the_thread_history_fails(galaxy_code):
+    gi = _fake_gi()
+    gi.histories.create_history.side_effect = GalaxyConnectionError("no", body="{}", status_code=galaxy_code)
+    with pytest.raises(GalaxyRunsError) as e:
+        await _service(gi).import_dataset("t1", LINK, "sample.tsv", True, "d_1", None, None)
+    assert e.value.status_code == 422
+
+
+async def test_links_are_redacted_inside_lists_and_when_url_encoded(caplog):
+    gi = _fake_gi()
+    encoded = LINK.replace("/", "%2F")
+    gi.make_post_request.side_effect = GalaxyConnectionError(
+        "no", body=f'{{"err_msg": ["bad {encoded}", "and {LINK}"]}}', status_code=500)
+    with pytest.raises(GalaxyRunsError):
+        await _service(gi).import_dataset("t1", LINK, "sample.tsv", True, "d_1", None, None)
+    assert "SECRETTOKEN123" not in caplog.text

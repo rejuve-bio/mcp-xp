@@ -17,8 +17,8 @@ from app.context import current_api_key
 from app.galaxy import GalaxyClient
 from app.persistence import MongoStore
 from app.api.schemas.galaxy_runs import (
-    Dataset, Description, DescribeRequest, Link, LinkRequest, Problem, Run, RunList, RunRequest, SearchList,
-    ThreadFiles, Validation, ValidateRequest,
+    Dataset, Description, DescribeRequest, ImportedDataset, ImportRequest, Link, LinkRequest, Problem, Run, RunList,
+    RunRequest, SearchList, ThreadFiles, Validation, ValidateRequest,
 )
 from app.galaxy_runs import datasets
 from app.galaxy_runs.service import GalaxyRuns, GalaxyRunsError
@@ -182,6 +182,24 @@ async def upload_dataset(request: Request, svc: GalaxyRuns = Depends(galaxy_runs
                                      request.headers.get("content-length"), request.stream())
     except GalaxyRunsError as e:
         raise _http(e)
+
+
+@datasets_router.post(
+    "/import", status_code=201, summary="Put a file into the thread's Galaxy history from a link (file service deliveries)",
+    response_model=ImportedDataset,
+    responses={200: {"model": ImportedDataset, "description": "Repeat of a client_request_id: the dataset made the first time"},
+               **_errors(400, 422)})
+async def import_dataset(body: ImportRequest, response: Response, svc: GalaxyRuns = Depends(galaxy_runs)):
+    """Galaxy makes the dataset from the link; deferred, it keeps only the link and fetches the bytes when a job
+    needs them. Answers 422 with Galaxy's reason when Galaxy refuses the file, never 404."""
+    try:
+        dataset, repeat = await svc.import_dataset(body.thread_id, body.url, body.name, body.deferred,
+                                                   body.client_request_id, body.sha256, body.format)
+    except GalaxyRunsError as e:
+        raise _http(e)
+    if repeat:
+        response.status_code = 200
+    return dataset
 
 
 @datasets_router.get(

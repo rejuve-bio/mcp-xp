@@ -129,6 +129,7 @@ class CollectionNames(Enum):
     GALAXY_THREAD_HISTORIES = "GalaxyThreadHistories"
     GALAXY_RUNS = "GalaxyRuns"
     GALAXY_RUN_REQUESTS = "GalaxyRunRequests"
+    GALAXY_DATASET_IMPORTS = "GalaxyDatasetImports"
 
 class IndexingResponses(Enum):
     PENDING_MESSAGE = "Data Indexing in progress."
