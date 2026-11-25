@@ -1,0 +1,1288 @@
+{
+ "errors": {},
+ "id": "toolshed.g2.bx.psu.edu/repos/iuc/rgrnastar/rna_star/2.7.11b+galaxy1",
+ "inputs": [
+  {
+   "cases": [
+    {
+     "inputs": [
+      {
+       "cases": [
+        {
+         "inputs": [
+          {
+           "argument": "--genomeDir",
+           "default_value": null,
+           "display": null,
+           "help": "If your genome of interest is not listed, contact the Galaxy team",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": true,
+           "label": "Select reference genome",
+           "model_class": "SelectToolParameter",
+           "multiple": false,
+           "name": "genomeDir",
+           "optional": false,
+           "options": [],
+           "refresh_on_change": false,
+           "text_value": "None",
+           "textable": false,
+           "type": "select",
+           "value": null
+          },
+          {
+           "cases": [
+            {
+             "inputs": [],
+             "model_class": "ConditionalWhen",
+             "value": "-"
+            },
+            {
+             "inputs": [],
+             "model_class": "ConditionalWhen",
+             "value": "GeneCounts"
+            },
+            {
+             "inputs": [
+              {
+               "argument": "--quantTranscriptomeSAMoutput",
+               "default_value": "BanSingleEnd_BanIndels_ExtendSoftclip",
+               "display": null,
+               "help": "",
+               "help_format": "html",
+               "hidden": false,
+               "is_dynamic": false,
+               "label": "Alignment filtering for TranscriptomeSAM output",
+               "model_class": "SelectToolParameter",
+               "multiple": false,
+               "name": "quantTranscriptomeSAMoutput",
+               "optional": false,
+               "options": [
+                [
+                 "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+                 "BanSingleEnd_BanIndels_ExtendSoftclip",
+                 true
+                ],
+                [
+                 "prohibit single-end alignments, allow indels and softclips",
+                 "BanSingleEnd",
+                 false
+                ],
+                [
+                 "prohibit single-end alignments, extend softclips, allow indels",
+                 "BanSingleEnd_ExtendSoftclip",
+                 false
+                ]
+               ],
+               "refresh_on_change": false,
+               "text_value": "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+               "textable": false,
+               "type": "select",
+               "value": "BanSingleEnd_BanIndels_ExtendSoftclip"
+              }
+             ],
+             "model_class": "ConditionalWhen",
+             "value": "TranscriptomeSAM"
+            },
+            {
+             "inputs": [
+              {
+               "argument": "--quantTranscriptomeSAMoutput",
+               "default_value": "BanSingleEnd_BanIndels_ExtendSoftclip",
+               "display": null,
+               "help": "",
+               "help_format": "html",
+               "hidden": false,
+               "is_dynamic": false,
+               "label": "Alignment filtering for TranscriptomeSAM output",
+               "model_class": "SelectToolParameter",
+               "multiple": false,
+               "name": "quantTranscriptomeSAMoutput",
+               "optional": false,
+               "options": [
+                [
+                 "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+                 "BanSingleEnd_BanIndels_ExtendSoftclip",
+                 true
+                ],
+                [
+                 "prohibit single-end alignments, allow indels and softclips",
+                 "BanSingleEnd",
+                 false
+                ],
+                [
+                 "prohibit single-end alignments, extend softclips, allow indels",
+                 "BanSingleEnd_ExtendSoftclip",
+                 false
+                ]
+               ],
+               "refresh_on_change": false,
+               "text_value": "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+               "textable": false,
+               "type": "select",
+               "value": "BanSingleEnd_BanIndels_ExtendSoftclip"
+              }
+             ],
+             "model_class": "ConditionalWhen",
+             "value": "TranscriptomeSAM GeneCounts"
+            }
+           ],
+           "model_class": "Conditional",
+           "name": "quantmode_output",
+           "test_param": {
+            "argument": "--quantMode",
+            "display": null,
+            "help": "STAR can provide analysis results not only with respect to the reference genome, but also with respect to genes and transcripts described by a gene model. Note: This functionality requires either the selection above of a cached index with a gene model, or a gene model provided alongside the index/reference genome in GTF or GFF3 format!",
+            "help_format": "html",
+            "hidden": false,
+            "is_dynamic": false,
+            "label": "Per gene/transcript output",
+            "model_class": "SelectToolParameter",
+            "multiple": false,
+            "name": "quantMode",
+            "optional": false,
+            "options": [
+             [
+              "No per gene or transcript output",
+              "-",
+              false
+             ],
+             [
+              "Per gene read counts (GeneCounts)",
+              "GeneCounts",
+              false
+             ],
+             [
+              "Transcript-based BAM output (TranscriptomeSAM)",
+              "TranscriptomeSAM",
+              false
+             ],
+             [
+              "Both per gene read counts and transcript-based BAM output (TranscriptomeSAM GeneCounts)",
+              "TranscriptomeSAM GeneCounts",
+              false
+             ]
+            ],
+            "refresh_on_change": true,
+            "text_value": "No per gene or transcript output",
+            "textable": false,
+            "type": "select",
+            "value": "-"
+           },
+           "type": "conditional"
+          }
+         ],
+         "model_class": "ConditionalWhen",
+         "value": "with-gtf"
+        },
+        {
+         "inputs": [
+          {
+           "argument": "--genomeDir",
+           "default_value": "apiMel4",
+           "display": null,
+           "help": "If your genome of interest is not listed, contact the Galaxy team",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": true,
+           "label": "Select reference genome",
+           "model_class": "SelectToolParameter",
+           "multiple": false,
+           "name": "genomeDir",
+           "optional": false,
+           "options": [
+            [
+             "A. mellifera 04 Nov 2010 (Amel_4.5/apiMel4) (apiMel4)",
+             "apiMel4",
+             false
+            ],
+            [
+             "A. mellifera Nov. 2010 (GCF_000002195.4/Amel_4.5) (Amel_4.5)",
+             "Amel_4.5",
+             false
+            ],
+            [
+             "Arabidopsis thaliana: Arabidopsis_thaliana_TAIR10",
+             "Arabidopsis_thaliana_TAIR10",
+             false
+            ],
+            [
+             "C. elegans (WS210): ce9",
+             "ce9",
+             false
+            ],
+            [
+             "C. elegans (WS220): ce10",
+             "ce10",
+             false
+            ],
+            [
+             "D. melanogaster Aug. 2014 (BDGP Release 6 + ISO1 MT/dm6) (dm6)",
+             "dm6",
+             false
+            ],
+            [
+             "Fruit Fly (Drosophila melanogaster): dm3",
+             "dm3",
+             false
+            ],
+            [
+             "Human (Homo sapiens) (b37): hg19",
+             "hg19",
+             false
+            ],
+            [
+             "Human (Homo sapiens) (b37): hg19 chrX",
+             "hg19chrX",
+             false
+            ],
+            [
+             "Human (Homo sapiens) (b38): hg38",
+             "hg38",
+             false
+            ],
+            [
+             "Human CHM13 2.0 (T2T Consortium) Jan. 2022",
+             "CHM13_T2T_v2.0",
+             false
+            ],
+            [
+             "Mouse (Mus Musculus): GRCm39/mm39",
+             "mm39",
+             false
+            ],
+            [
+             "Mouse (Mus Musculus): mm10",
+             "mm10",
+             false
+            ],
+            [
+             "Mouse (Mus musculus): mm9",
+             "mm9",
+             false
+            ],
+            [
+             "Rat (Rattus norvegicus): rn5",
+             "rn5",
+             false
+            ],
+            [
+             "Rat Jul. 2014 (RGSC 6.0/rn6) (rn6)",
+             "rn6",
+             false
+            ],
+            [
+             "Yeast (Saccharomyces cerevisiae): sacCer2",
+             "sacCer2",
+             false
+            ],
+            [
+             "Yeast (Saccharomyces cerevisiae): sacCer3",
+             "sacCer3",
+             false
+            ]
+           ],
+           "refresh_on_change": false,
+           "text_value": "apiMel4",
+           "textable": false,
+           "type": "select",
+           "value": "apiMel4"
+          },
+          {
+           "argument": "--sjdbGTFfile",
+           "default_value": null,
+           "edam": {
+            "edam_data": [
+             "data_1255",
+             "data_1255"
+            ],
+            "edam_formats": [
+             "format_1975",
+             "format_2306"
+            ]
+           },
+           "extensions": [
+            "gff3",
+            "gtf"
+           ],
+           "help": "Exon junction information for mapping splices",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": false,
+           "label": "Gene model (gff3,gtf) file for splice junctions",
+           "model_class": "DataToolParameter",
+           "multiple": false,
+           "name": "sjdbGTFfile",
+           "optional": false,
+           "options": {
+            "hda": [],
+            "hdca": []
+           },
+           "options_meta": {
+            "hda": {
+             "has_more": false,
+             "limit": 50,
+             "offset": 0,
+             "total_estimate": 0
+            },
+            "hdca": {
+             "has_more": false,
+             "limit": 50,
+             "offset": 0,
+             "total_estimate": 0
+            }
+           },
+           "pinned": {
+            "dce": [],
+            "hda": [],
+            "hdca": [],
+            "ldda": []
+           },
+           "refresh_on_change": true,
+           "tag": null,
+           "text_value": "No dataset.",
+           "type": "data",
+           "value": null
+          },
+          {
+           "area": false,
+           "argument": "--sjdbGTFfeatureExon",
+           "datalist": [],
+           "default_value": "exon",
+           "help": "By default and for almost all cases: 'exon', referring to finding junctions at the RNA splice sites. This can optionally be changed to allow splicing at other levels, such as 'gene', 'transcript', 'CDS'.",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": false,
+           "label": "Elements to use from the gene model to use for splice junctions",
+           "model_class": "TextToolParameter",
+           "name": "sjdbGTFfeatureExon",
+           "optional": true,
+           "refresh_on_change": false,
+           "text_value": "exon",
+           "type": "text",
+           "value": "exon"
+          },
+          {
+           "area": false,
+           "argument": "--sjdbOverhang",
+           "datalist": [],
+           "default_value": "100",
+           "help": "Used in constructing the splice junctions database. Ideal value is ReadLength-1",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": false,
+           "label": "Length of the genomic sequence around annotated junctions",
+           "max": null,
+           "min": 1,
+           "model_class": "IntegerToolParameter",
+           "name": "sjdbOverhang",
+           "optional": false,
+           "refresh_on_change": false,
+           "text_value": "100",
+           "type": "integer",
+           "value": "100"
+          },
+          {
+           "cases": [
+            {
+             "inputs": [],
+             "model_class": "ConditionalWhen",
+             "value": "-"
+            },
+            {
+             "inputs": [],
+             "model_class": "ConditionalWhen",
+             "value": "GeneCounts"
+            },
+            {
+             "inputs": [
+              {
+               "argument": "--quantTranscriptomeSAMoutput",
+               "default_value": "BanSingleEnd_BanIndels_ExtendSoftclip",
+               "display": null,
+               "help": "",
+               "help_format": "html",
+               "hidden": false,
+               "is_dynamic": false,
+               "label": "Alignment filtering for TranscriptomeSAM output",
+               "model_class": "SelectToolParameter",
+               "multiple": false,
+               "name": "quantTranscriptomeSAMoutput",
+               "optional": false,
+               "options": [
+                [
+                 "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+                 "BanSingleEnd_BanIndels_ExtendSoftclip",
+                 true
+                ],
+                [
+                 "prohibit single-end alignments, allow indels and softclips",
+                 "BanSingleEnd",
+                 false
+                ],
+                [
+                 "prohibit single-end alignments, extend softclips, allow indels",
+                 "BanSingleEnd_ExtendSoftclip",
+                 false
+                ]
+               ],
+               "refresh_on_change": false,
+               "text_value": "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+               "textable": false,
+               "type": "select",
+               "value": "BanSingleEnd_BanIndels_ExtendSoftclip"
+              }
+             ],
+             "model_class": "ConditionalWhen",
+             "value": "TranscriptomeSAM"
+            },
+            {
+             "inputs": [
+              {
+               "argument": "--quantTranscriptomeSAMoutput",
+               "default_value": "BanSingleEnd_BanIndels_ExtendSoftclip",
+               "display": null,
+               "help": "",
+               "help_format": "html",
+               "hidden": false,
+               "is_dynamic": false,
+               "label": "Alignment filtering for TranscriptomeSAM output",
+               "model_class": "SelectToolParameter",
+               "multiple": false,
+               "name": "quantTranscriptomeSAMoutput",
+               "optional": false,
+               "options": [
+                [
+                 "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+                 "BanSingleEnd_BanIndels_ExtendSoftclip",
+                 true
+                ],
+                [
+                 "prohibit single-end alignments, allow indels and softclips",
+                 "BanSingleEnd",
+                 false
+                ],
+                [
+                 "prohibit single-end alignments, extend softclips, allow indels",
+                 "BanSingleEnd_ExtendSoftclip",
+                 false
+                ]
+               ],
+               "refresh_on_change": false,
+               "text_value": "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+               "textable": false,
+               "type": "select",
+               "value": "BanSingleEnd_BanIndels_ExtendSoftclip"
+              }
+             ],
+             "model_class": "ConditionalWhen",
+             "value": "TranscriptomeSAM GeneCounts"
+            }
+           ],
+           "model_class": "Conditional",
+           "name": "quantmode_output",
+           "test_param": {
+            "argument": "--quantMode",
+            "display": null,
+            "help": "STAR can provide analysis results not only with respect to the reference genome, but also with respect to genes and transcripts described by a gene model. Note: This functionality requires either the selection above of a cached index with a gene model, or a gene model provided alongside the index/reference genome in GTF or GFF3 format!",
+            "help_format": "html",
+            "hidden": false,
+            "is_dynamic": false,
+            "label": "Per gene/transcript output",
+            "model_class": "SelectToolParameter",
+            "multiple": false,
+            "name": "quantMode",
+            "optional": false,
+            "options": [
+             [
+              "No per gene or transcript output",
+              "-",
+              false
+             ],
+             [
+              "Per gene read counts (GeneCounts)",
+              "GeneCounts",
+              false
+             ],
+             [
+              "Transcript-based BAM output (TranscriptomeSAM)",
+              "TranscriptomeSAM",
+              false
+             ],
+             [
+              "Both per gene read counts and transcript-based BAM output (TranscriptomeSAM GeneCounts)",
+              "TranscriptomeSAM GeneCounts",
+              false
+             ]
+            ],
+            "refresh_on_change": true,
+            "text_value": "No per gene or transcript output",
+            "textable": false,
+            "type": "select",
+            "value": "-"
+           },
+           "type": "conditional"
+          }
+         ],
+         "model_class": "ConditionalWhen",
+         "value": "without-gtf-with-gtf"
+        },
+        {
+         "inputs": [
+          {
+           "argument": "--genomeDir",
+           "default_value": "apiMel4",
+           "display": null,
+           "help": "If your genome of interest is not listed, contact the Galaxy team",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": true,
+           "label": "Select reference genome",
+           "model_class": "SelectToolParameter",
+           "multiple": false,
+           "name": "genomeDir",
+           "optional": false,
+           "options": [
+            [
+             "A. mellifera 04 Nov 2010 (Amel_4.5/apiMel4) (apiMel4)",
+             "apiMel4",
+             false
+            ],
+            [
+             "A. mellifera Nov. 2010 (GCF_000002195.4/Amel_4.5) (Amel_4.5)",
+             "Amel_4.5",
+             false
+            ],
+            [
+             "Arabidopsis thaliana: Arabidopsis_thaliana_TAIR10",
+             "Arabidopsis_thaliana_TAIR10",
+             false
+            ],
+            [
+             "C. elegans (WS210): ce9",
+             "ce9",
+             false
+            ],
+            [
+             "C. elegans (WS220): ce10",
+             "ce10",
+             false
+            ],
+            [
+             "D. melanogaster Aug. 2014 (BDGP Release 6 + ISO1 MT/dm6) (dm6)",
+             "dm6",
+             false
+            ],
+            [
+             "Fruit Fly (Drosophila melanogaster): dm3",
+             "dm3",
+             false
+            ],
+            [
+             "Human (Homo sapiens) (b37): hg19",
+             "hg19",
+             false
+            ],
+            [
+             "Human (Homo sapiens) (b37): hg19 chrX",
+             "hg19chrX",
+             false
+            ],
+            [
+             "Human (Homo sapiens) (b38): hg38",
+             "hg38",
+             false
+            ],
+            [
+             "Human CHM13 2.0 (T2T Consortium) Jan. 2022",
+             "CHM13_T2T_v2.0",
+             false
+            ],
+            [
+             "Mouse (Mus Musculus): GRCm39/mm39",
+             "mm39",
+             false
+            ],
+            [
+             "Mouse (Mus Musculus): mm10",
+             "mm10",
+             false
+            ],
+            [
+             "Mouse (Mus musculus): mm9",
+             "mm9",
+             false
+            ],
+            [
+             "Rat (Rattus norvegicus): rn5",
+             "rn5",
+             false
+            ],
+            [
+             "Rat Jul. 2014 (RGSC 6.0/rn6) (rn6)",
+             "rn6",
+             false
+            ],
+            [
+             "Yeast (Saccharomyces cerevisiae): sacCer2",
+             "sacCer2",
+             false
+            ],
+            [
+             "Yeast (Saccharomyces cerevisiae): sacCer3",
+             "sacCer3",
+             false
+            ]
+           ],
+           "refresh_on_change": false,
+           "text_value": "apiMel4",
+           "textable": false,
+           "type": "select",
+           "value": "apiMel4"
+          },
+          {
+           "cases": [
+            {
+             "inputs": [],
+             "model_class": "ConditionalWhen",
+             "value": "-"
+            }
+           ],
+           "model_class": "Conditional",
+           "name": "quantmode_output",
+           "test_param": {
+            "argument": "--quantMode",
+            "display": null,
+            "help": "",
+            "help_format": "html",
+            "hidden": false,
+            "is_dynamic": false,
+            "label": "Per gene/transcript output",
+            "model_class": "SelectToolParameter",
+            "multiple": false,
+            "name": "quantMode",
+            "optional": false,
+            "options": [
+             [
+              "No per gene or transcript output as no GTF was provided",
+              "-",
+              false
+             ]
+            ],
+            "refresh_on_change": true,
+            "text_value": "No per gene or transcript output as no GTF was provided",
+            "textable": false,
+            "type": "select",
+            "value": "-"
+           },
+           "type": "conditional"
+          }
+         ],
+         "model_class": "ConditionalWhen",
+         "value": "without-gtf"
+        }
+       ],
+       "model_class": "Conditional",
+       "name": "GTFconditional",
+       "test_param": {
+        "argument": null,
+        "display": null,
+        "help": "Select the '... with builtin gene-model' option to select from the list of available indexes that were built with splice junction information. Select the '... without builtin gene-model' option to select from the list of available indexes without annotated splice junctions, and, optionally, provide your own splice-junction annonations.",
+        "help_format": "html",
+        "hidden": false,
+        "is_dynamic": false,
+        "label": "Reference genome with or without an annotation",
+        "model_class": "SelectToolParameter",
+        "multiple": false,
+        "name": "GTFselect",
+        "optional": false,
+        "options": [
+         [
+          "use genome reference without builtin gene-model but provide a gtf",
+          "without-gtf-with-gtf",
+          true
+         ],
+         [
+          "use genome reference without builtin gene-model and do not provide a gtf",
+          "without-gtf",
+          false
+         ],
+         [
+          "use genome reference with builtin gene-model",
+          "with-gtf",
+          false
+         ]
+        ],
+        "refresh_on_change": true,
+        "text_value": "use genome reference without builtin gene-model but provide a gtf",
+        "textable": false,
+        "type": "select",
+        "value": "without-gtf-with-gtf"
+       },
+       "type": "conditional"
+      }
+     ],
+     "model_class": "ConditionalWhen",
+     "value": "indexed"
+    },
+    {
+     "inputs": [
+      {
+       "argument": "--genomeFastaFiles",
+       "default_value": null,
+       "edam": {
+        "edam_data": [
+         "data_2044",
+         "data_2044"
+        ],
+        "edam_formats": [
+         "format_1929",
+         "format_1929"
+        ]
+       },
+       "extensions": [
+        "fasta",
+        "fasta.gz"
+       ],
+       "help": "",
+       "help_format": "html",
+       "hidden": false,
+       "is_dynamic": false,
+       "label": "Select a reference genome",
+       "model_class": "DataToolParameter",
+       "multiple": false,
+       "name": "genomeFastaFiles",
+       "optional": false,
+       "options": {
+        "hda": [],
+        "hdca": []
+       },
+       "options_meta": {
+        "hda": {
+         "has_more": false,
+         "limit": 50,
+         "offset": 0,
+         "total_estimate": 0
+        },
+        "hdca": {
+         "has_more": false,
+         "limit": 50,
+         "offset": 0,
+         "total_estimate": 0
+        }
+       },
+       "pinned": {
+        "dce": [],
+        "hda": [],
+        "hdca": [],
+        "ldda": []
+       },
+       "refresh_on_change": true,
+       "tag": null,
+       "text_value": "No dataset.",
+       "type": "data",
+       "value": null
+      },
+      {
+       "area": false,
+       "argument": "--genomeSAindexNbases",
+       "datalist": [],
+       "default_value": "14",
+       "help": "Typically between 10 and 15. Longer strings will use much more memory, but allow faster searches. For small genomes, the parameter --genomeSAindexNbases must be scaled down to min(14, log2(GenomeLength)/2 - 1)",
+       "help_format": "html",
+       "hidden": false,
+       "is_dynamic": false,
+       "label": "Length of the SA pre-indexing string",
+       "max": 16,
+       "min": 2,
+       "model_class": "IntegerToolParameter",
+       "name": "genomeSAindexNbases",
+       "optional": false,
+       "refresh_on_change": false,
+       "text_value": "14",
+       "type": "integer",
+       "value": "14"
+      },
+      {
+       "cases": [
+        {
+         "inputs": [
+          {
+           "argument": "--sjdbGTFfile",
+           "default_value": null,
+           "edam": {
+            "edam_data": [
+             "data_1255",
+             "data_1255"
+            ],
+            "edam_formats": [
+             "format_1975",
+             "format_2306"
+            ]
+           },
+           "extensions": [
+            "gff3",
+            "gtf"
+           ],
+           "help": "Exon junction information for mapping splices",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": false,
+           "label": "Gene model (gff3,gtf) file for splice junctions",
+           "model_class": "DataToolParameter",
+           "multiple": false,
+           "name": "sjdbGTFfile",
+           "optional": false,
+           "options": {
+            "hda": [],
+            "hdca": []
+           },
+           "options_meta": {
+            "hda": {
+             "has_more": false,
+             "limit": 50,
+             "offset": 0,
+             "total_estimate": 0
+            },
+            "hdca": {
+             "has_more": false,
+             "limit": 50,
+             "offset": 0,
+             "total_estimate": 0
+            }
+           },
+           "pinned": {
+            "dce": [],
+            "hda": [],
+            "hdca": [],
+            "ldda": []
+           },
+           "refresh_on_change": true,
+           "tag": null,
+           "text_value": "No dataset.",
+           "type": "data",
+           "value": null
+          },
+          {
+           "area": false,
+           "argument": "--sjdbGTFfeatureExon",
+           "datalist": [],
+           "default_value": "exon",
+           "help": "By default and for almost all cases: 'exon', referring to finding junctions at the RNA splice sites. This can optionally be changed to allow splicing at other levels, such as 'gene', 'transcript', 'CDS'.",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": false,
+           "label": "Elements to use from the gene model to use for splice junctions",
+           "model_class": "TextToolParameter",
+           "name": "sjdbGTFfeatureExon",
+           "optional": true,
+           "refresh_on_change": false,
+           "text_value": "exon",
+           "type": "text",
+           "value": "exon"
+          },
+          {
+           "area": false,
+           "argument": "--sjdbOverhang",
+           "datalist": [],
+           "default_value": "100",
+           "help": "Used in constructing the splice junctions database. Ideal value is ReadLength-1",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": false,
+           "label": "Length of the genomic sequence around annotated junctions",
+           "max": null,
+           "min": 1,
+           "model_class": "IntegerToolParameter",
+           "name": "sjdbOverhang",
+           "optional": false,
+           "refresh_on_change": false,
+           "text_value": "100",
+           "type": "integer",
+           "value": "100"
+          },
+          {
+           "cases": [
+            {
+             "inputs": [],
+             "model_class": "ConditionalWhen",
+             "value": "-"
+            },
+            {
+             "inputs": [],
+             "model_class": "ConditionalWhen",
+             "value": "GeneCounts"
+            },
+            {
+             "inputs": [
+              {
+               "argument": "--quantTranscriptomeSAMoutput",
+               "default_value": "BanSingleEnd_BanIndels_ExtendSoftclip",
+               "display": null,
+               "help": "",
+               "help_format": "html",
+               "hidden": false,
+               "is_dynamic": false,
+               "label": "Alignment filtering for TranscriptomeSAM output",
+               "model_class": "SelectToolParameter",
+               "multiple": false,
+               "name": "quantTranscriptomeSAMoutput",
+               "optional": false,
+               "options": [
+                [
+                 "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+                 "BanSingleEnd_BanIndels_ExtendSoftclip",
+                 true
+                ],
+                [
+                 "prohibit single-end alignments, allow indels and softclips",
+                 "BanSingleEnd",
+                 false
+                ],
+                [
+                 "prohibit single-end alignments, extend softclips, allow indels",
+                 "BanSingleEnd_ExtendSoftclip",
+                 false
+                ]
+               ],
+               "refresh_on_change": false,
+               "text_value": "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+               "textable": false,
+               "type": "select",
+               "value": "BanSingleEnd_BanIndels_ExtendSoftclip"
+              }
+             ],
+             "model_class": "ConditionalWhen",
+             "value": "TranscriptomeSAM"
+            },
+            {
+             "inputs": [
+              {
+               "argument": "--quantTranscriptomeSAMoutput",
+               "default_value": "BanSingleEnd_BanIndels_ExtendSoftclip",
+               "display": null,
+               "help": "",
+               "help_format": "html",
+               "hidden": false,
+               "is_dynamic": false,
+               "label": "Alignment filtering for TranscriptomeSAM output",
+               "model_class": "SelectToolParameter",
+               "multiple": false,
+               "name": "quantTranscriptomeSAMoutput",
+               "optional": false,
+               "options": [
+                [
+                 "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+                 "BanSingleEnd_BanIndels_ExtendSoftclip",
+                 true
+                ],
+                [
+                 "prohibit single-end alignments, allow indels and softclips",
+                 "BanSingleEnd",
+                 false
+                ],
+                [
+                 "prohibit single-end alignments, extend softclips, allow indels",
+                 "BanSingleEnd_ExtendSoftclip",
+                 false
+                ]
+               ],
+               "refresh_on_change": false,
+               "text_value": "prohibit indels and single-end alignments, extend softclips - compatible with RSEM",
+               "textable": false,
+               "type": "select",
+               "value": "BanSingleEnd_BanIndels_ExtendSoftclip"
+              }
+             ],
+             "model_class": "ConditionalWhen",
+             "value": "TranscriptomeSAM GeneCounts"
+            }
+           ],
+           "model_class": "Conditional",
+           "name": "quantmode_output",
+           "test_param": {
+            "argument": "--quantMode",
+            "display": null,
+            "help": "STAR can provide analysis results not only with respect to the reference genome, but also with respect to genes and transcripts described by a gene model. Note: This functionality requires either the selection above of a cached index with a gene model, or a gene model provided alongside the index/reference genome in GTF or GFF3 format!",
+            "help_format": "html",
+            "hidden": false,
+            "is_dynamic": false,
+            "label": "Per gene/transcript output",
+            "model_class": "SelectToolParameter",
+            "multiple": false,
+            "name": "quantMode",
+            "optional": false,
+            "options": [
+             [
+              "No per gene or transcript output",
+              "-",
+              false
+             ],
+             [
+              "Per gene read counts (GeneCounts)",
+              "GeneCounts",
+              false
+             ],
+             [
+              "Transcript-based BAM output (TranscriptomeSAM)",
+              "TranscriptomeSAM",
+              false
+             ],
+             [
+              "Both per gene read counts and transcript-based BAM output (TranscriptomeSAM GeneCounts)",
+              "TranscriptomeSAM GeneCounts",
+              false
+             ]
+            ],
+            "refresh_on_change": true,
+            "text_value": "No per gene or transcript output",
+            "textable": false,
+            "type": "select",
+            "value": "-"
+           },
+           "type": "conditional"
+          }
+         ],
+         "model_class": "ConditionalWhen",
+         "value": "with-gtf"
+        },
+        {
+         "inputs": [
+          {
+           "cases": [
+            {
+             "inputs": [],
+             "model_class": "ConditionalWhen",
+             "value": "-"
+            }
+           ],
+           "model_class": "Conditional",
+           "name": "quantmode_output",
+           "test_param": {
+            "argument": "--quantMode",
+            "display": null,
+            "help": "",
+            "help_format": "html",
+            "hidden": false,
+            "is_dynamic": false,
+            "label": "Per gene/transcript output",
+            "model_class": "SelectToolParameter",
+            "multiple": false,
+            "name": "quantMode",
+            "optional": false,
+            "options": [
+             [
+              "No per gene or transcript output as no GTF was provided",
+              "-",
+              false
+             ]
+            ],
+            "refresh_on_change": true,
+            "text_value": "No per gene or transcript output as no GTF was provided",
+            "textable": false,
+            "type": "select",
+            "value": "-"
+           },
+           "type": "conditional"
+          }
+         ],
+         "model_class": "ConditionalWhen",
+         "value": "without-gtf"
+        }
+       ],
+       "model_class": "Conditional",
+       "name": "GTFconditional",
+       "test_param": {
+        "argument": null,
+        "display": null,
+        "help": "To build an index with known splice junctions annotated, you will have to provide a GTF or GFF3 dataset that describes the gene models (the location of genes, transcripts and exons) known for the reference genome.",
+        "help_format": "html",
+        "hidden": false,
+        "is_dynamic": false,
+        "label": "Build index with or without known splice junctions annotation",
+        "model_class": "SelectToolParameter",
+        "multiple": false,
+        "name": "GTFselect",
+        "optional": false,
+        "options": [
+         [
+          "build index without gene-model",
+          "without-gtf",
+          false
+         ],
+         [
+          "build index with gene-model",
+          "with-gtf",
+          false
+         ]
+        ],
+        "refresh_on_change": true,
+        "text_value": "build index without gene-model",
+        "textable": false,
+        "type": "select",
+        "value": "without-gtf"
+       },
+       "type": "conditional"
+      },
+      {
+       "cases": [
+        {
+         "inputs": [
+          {
+           "argument": "--genomeTransformVCF",
+           "default_value": null,
+           "edam": {
+            "edam_data": [
+             "data_0006"
+            ],
+            "edam_formats": [
+             "format_3016"
+            ]
+           },
+           "extensions": [
+            "vcf"
+           ],
+           "help": "The homozygous and heterozygous alleles from this VCF will be inserted into the reference genome to create a transformed genome with two haplotypes",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": false,
+           "label": "VCF file with diploid SNVs and InDels",
+           "model_class": "DataToolParameter",
+           "multiple": false,
+           "name": "genomeTransformVCF",
+           "optional": false,
+           "options": {
+            "hda": [],
+            "hdca": []
+           },
+           "options_meta": {
+            "hda": {
+             "has_more": false,
+             "limit": 50,
+             "offset": 0,
+             "total_estimate": 0
+            },
+            "hdca": {
+             "has_more": false,
+             "limit": 50,
+             "offset": 0,
+             "total_estimate": 0
+            }
+           },
+           "pinned": {
+            "dce": [],
+            "hda": [],
+            "hdca": [],
+            "ldda": []
+           },
+           "refresh_on_change": true,
+           "tag": null,
+           "text_value": "No dataset.",
+           "type": "data",
+           "value": null
+          },
+          {
+           "argument": "--genomeTransformOutput",
+           "default_value": false,
+           "falsevalue": "--genomeTransformOutput None",
+           "help": "Use this if downstream processing relies on reference coordinates",
+           "help_format": "html",
+           "hidden": false,
+           "is_dynamic": false,
+           "label": "Transform alignments, spliced junctions and quantifications back to                         the reference coordinates",
+           "model_class": "BooleanToolParameter",
+           "name": "genomeTransformOutput",
+           "optional": false,
+           "refresh_on_change": false,
+           "text_value": "False",
+           "truevalue": "--genomeTransformOutput SAM SJ Quant",
+           "type": "boolean",
+           "value": false
+          }
+         ],
+         "model_class": "ConditionalWhen",
+         "value": "Yes"
+        },
+        {
+         "inputs": [],
+         "model_class": "ConditionalWhen",
+         "value": "No"
+        }
+       ],
+       "model_class": "Conditional",
+       "name": "diploidconditional",
+       "test_param": {
+        "argument": null,
+        "display": null,
+        "help": "Map RNA-seq reads to a diploid genome",
+        "help_format": "html",
+        "hidden": false,
+        "is_dynamic": false,
+        "label": "Diploid mode",
+        "model_class": "SelectToolParameter",
+        "multiple": false,
+        "name": "diploid",
+        "optional": false,
+        "options": [
+         [
+          "No",
+          "No",
+          true
+         ],
+         [
+          "Yes",
+          "Yes",
+          false
+         ]
+        ],
+        "refresh_on_change": true,
+        "text_value": "No",
+        "textable": false,
+        "type": "select",
+        "value": "No"
+       },
+       "type": "conditional"
+      }
+     ],
+     "model_class": "ConditionalWhen",
+     "value": "history"
+    }
+   ],
+   "model_class": "Conditional",
+   "name": "refGenomeSource",
+   "test_param": {
+    "argument": null,
+    "display": null,
+    "help": "Built-ins were indexed using default options",
+    "help_format": "html",
+    "hidden": false,
+    "is_dynamic": false,
+    "label": "Custom or built-in reference genome",
+    "model_class": "SelectToolParameter",
+    "multiple": false,
+    "name": "geneSource",
+    "optional": false,
+    "options": [
+     [
+      "Use a built-in index",
+      "indexed",
+      true
+     ],
+     [
+      "Use reference genome from history and create temporary index",
+      "history",
+      false
+     ]
+    ],
+    "refresh_on_change": true,
+    "text_value": "Use a built-in index",
+    "textable": false,
+    "type": "select",
+    "value": "indexed"
+   },
+   "type": "conditional"
+  }
+ ],
+ "name": "RNA STAR",
+ "version": "2.7.11b+galaxy1"
+}
