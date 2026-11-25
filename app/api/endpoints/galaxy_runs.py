@@ -216,3 +216,24 @@ async def download_dataset(dataset_id: str = Path(..., min_length=1, max_length=
         return await datasets.download(svc, dataset_id, range, metadata_file)
     except GalaxyRunsError as e:
         raise _http(e)
+
+
+# ---------------------------------------------------------------- /v1/galaxy/toolshed: tools not yet installed
+
+from app.api.schemas.galaxy_runs import ToolShedSearchList  # noqa: E402
+from app.galaxy_runs import toolshed  # noqa: E402
+
+
+def toolshed_http() -> toolshed.HttpFactory:
+    return toolshed.default_http
+
+
+@router.get("/toolshed/search", summary="Main ToolShed repositories, installed here or not",
+            response_model=ToolShedSearchList, responses=_errors(400))
+async def toolshed_search(q: str = Query(..., min_length=1), svc: GalaxyRuns = Depends(galaxy_runs),
+                          http: toolshed.HttpFactory = Depends(toolshed_http)):
+    """Each repository's latest installable revision and its tool ids. 502 when the ToolShed can't be reached."""
+    try:
+        return await toolshed.search(svc, q, http)
+    except GalaxyRunsError as e:
+        raise _http(e)
