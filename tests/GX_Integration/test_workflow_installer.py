@@ -63,7 +63,7 @@ async def test_ensure_repository_installable_uninstalls_deleted_repo(workflow_in
     }
     workflow_installer.gi_admin.gi.toolShed.get_repositories.return_value = [repo]
 
-    with patch("app.GX_integration.workflows.worklfow_installer.httpx.AsyncClient") as mock_client_cls, \
+    with patch("app.GX_integration.toolshed.httpx.AsyncClient") as mock_client_cls, \
          patch.object(workflow_installer, "_tool_exists", new=AsyncMock(return_value=False)), \
          patch.object(workflow_installer, "_reload_toolbox", new=AsyncMock()) as mock_reload:
         mock_client = _mock_httpx_client({"mock_client_cls": mock_client_cls})
@@ -94,7 +94,7 @@ async def test_ensure_repository_installable_uninstalls_uninstalled_flag_repo(wo
     }
     workflow_installer.gi_admin.gi.toolShed.get_repositories.return_value = [repo]
 
-    with patch("app.GX_integration.workflows.worklfow_installer.httpx.AsyncClient") as mock_client_cls, \
+    with patch("app.GX_integration.toolshed.httpx.AsyncClient") as mock_client_cls, \
          patch.object(workflow_installer, "_tool_exists", new=AsyncMock(return_value=False)), \
          patch.object(workflow_installer, "_reload_toolbox", new=AsyncMock()):
         mock_client = _mock_httpx_client({"mock_client_cls": mock_client_cls})
@@ -120,7 +120,7 @@ async def test_ensure_repository_installable_uninstalls_installed_but_missing(wo
     }
     workflow_installer.gi_admin.gi.toolShed.get_repositories.return_value = [repo]
 
-    with patch("app.GX_integration.workflows.worklfow_installer.httpx.AsyncClient") as mock_client_cls, \
+    with patch("app.GX_integration.toolshed.httpx.AsyncClient") as mock_client_cls, \
          patch.object(workflow_installer, "_tool_exists", new=AsyncMock(return_value=False)), \
          patch.object(workflow_installer, "_reload_toolbox", new=AsyncMock()):
         mock_client = _mock_httpx_client({"mock_client_cls": mock_client_cls})
@@ -145,7 +145,7 @@ async def test_ensure_repository_installable_uninstalls_error_status(workflow_in
     }
     workflow_installer.gi_admin.gi.toolShed.get_repositories.return_value = [repo]
 
-    with patch("app.GX_integration.workflows.worklfow_installer.httpx.AsyncClient") as mock_client_cls, \
+    with patch("app.GX_integration.toolshed.httpx.AsyncClient") as mock_client_cls, \
          patch.object(workflow_installer, "_tool_exists", new=AsyncMock(return_value=False)), \
          patch.object(workflow_installer, "_reload_toolbox", new=AsyncMock()):
         mock_client = _mock_httpx_client({"mock_client_cls": mock_client_cls})
@@ -170,7 +170,7 @@ async def test_ensure_repository_installable_skips_when_repo_healthy(workflow_in
     }
     workflow_installer.gi_admin.gi.toolShed.get_repositories.return_value = [repo]
 
-    with patch("app.GX_integration.workflows.worklfow_installer.httpx.AsyncClient") as mock_client_cls, \
+    with patch("app.GX_integration.toolshed.httpx.AsyncClient") as mock_client_cls, \
          patch.object(workflow_installer, "_tool_exists", new=AsyncMock(return_value=True)):
         await workflow_installer._ensure_repository_installable(step, step["tool_shed_repository"])
 
@@ -192,7 +192,7 @@ async def test_ensure_repository_installable_bails_when_repo_id_missing(workflow
     }
     workflow_installer.gi_admin.gi.toolShed.get_repositories.return_value = [repo]
 
-    with patch("app.GX_integration.workflows.worklfow_installer.httpx.AsyncClient") as mock_client_cls, \
+    with patch("app.GX_integration.toolshed.httpx.AsyncClient") as mock_client_cls, \
          patch.object(workflow_installer, "_tool_exists", new=AsyncMock(return_value=False)):
         await workflow_installer._ensure_repository_installable(step, step["tool_shed_repository"])
 

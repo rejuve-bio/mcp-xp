@@ -12,6 +12,7 @@ HISTORIES = CollectionNames.GALAXY_THREAD_HISTORIES.value
 RUNS = CollectionNames.GALAXY_RUNS.value
 REQUESTS = CollectionNames.GALAXY_RUN_REQUESTS.value
 IMPORTS = CollectionNames.GALAXY_DATASET_IMPORTS.value
+INSTALLS = CollectionNames.GALAXY_TOOL_INSTALLS.value
 
 
 class RunStore:
@@ -74,3 +75,35 @@ class RunStore:
     async def release_import(self, username: str, client_request_id: str) -> None:
         """Forget an import that made nothing, so a retry can make it."""
         await self.mongo.delete(IMPORTS, f"{username}:{client_request_id}")
+
+    # ---- ToolShed installs: server-wide, so keyed by install id and repository revision, not by user ----
+
+    async def get_install(self, install_id: str) -> Optional[Dict[str, Any]]:
+        return await self.mongo.get(INSTALLS, f"install:{install_id}")
+
+    async def save_install(self, install: Dict[str, Any]) -> None:
+        await self.mongo.set(INSTALLS, f"install:{install['id']}", install)
+
+    async def delete_install(self, install_id: str) -> None:
+        await self.mongo.delete(INSTALLS, f"install:{install_id}")
+
+    async def claim_install_revision(self, key: str, install_id: str) -> bool:
+        """Only one install per repository revision runs at a time; this is its lock."""
+        return await self.mongo.set_if_absent(INSTALLS, f"revision:{key}", {"install_id": install_id})
+
+    async def get_install_revision(self, key: str) -> Optional[str]:
+        record = await self.mongo.get(INSTALLS, f"revision:{key}")
+        return record.get("install_id") if record else None
+
+    async def release_install_revision(self, key: str, install_id: str) -> None:
+        """Let a new install of the revision start, unless another one already holds it."""
+        if await self.get_install_revision(key) == install_id:
+            await self.mongo.delete(INSTALLS, f"revision:{key}")
+
+    async def claim_install_request(self, username: str, client_request_id: str, install_id: str) -> bool:
+        return await self.mongo.set_if_absent(INSTALLS, f"request:{username}:{client_request_id}",
+                                              {"install_id": install_id})
+
+    async def get_install_request(self, username: str, client_request_id: str) -> Optional[str]:
+        record = await self.mongo.get(INSTALLS, f"request:{username}:{client_request_id}")
+        return record.get("install_id") if record else None

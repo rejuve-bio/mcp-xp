@@ -255,3 +255,42 @@ class Dataset(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {
         "id": "f2db41e1fa331b3e", "name": "reads_R1.fastq.gz", "format": "fastqsanger.gz", "size": 1288490188,
         "state": "queued", "history_id": "1cd8e2f6b131e891", "created_at": "2026-10-09T10:02:00Z"}})
+
+
+# ---------------------------------------------------------------- ToolShed installs
+
+class InstallRequest(BaseModel):
+    owner: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.\-]+$")
+    name: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.\-]+$")
+    changeset_revision: Optional[str] = Field(None, pattern=r"^[0-9a-f]{12,40}$",
+                                              description="Defaults to the newest installable revision")
+    client_request_id: str = Field(..., min_length=1, max_length=128, description="Same id on a retry returns the stored install")
+    tool_shed: str = Field("toolshed.g2.bx.psu.edu", max_length=256, description="Only the main ToolShed is accepted")
+
+    model_config = ConfigDict(json_schema_extra={"example": {
+        "owner": "iuc", "name": "fastp", "changeset_revision": "e6bf0b6e0ad4",
+        "client_request_id": "b7e1c9d2-3f4a-4b5c-8d6e-7f8091a2b3c4"}})
+
+
+class InstalledTool(BaseModel):
+    id: str
+    version: Optional[str] = None
+
+
+class Install(BaseModel):
+    id: str
+    tool_shed: str
+    owner: str
+    name: str
+    changeset_revision: str
+    status: Literal["installing", "installed", "failed"]
+    tools: List[InstalledTool] = Field(..., description="Once installed: ready for /describe and /runs")
+    error: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+    model_config = ConfigDict(json_schema_extra={"example": {
+        "id": "install_3f9a1c2b7d4e", "tool_shed": "toolshed.g2.bx.psu.edu", "owner": "iuc", "name": "fastp",
+        "changeset_revision": "e6bf0b6e0ad4", "status": "installed",
+        "tools": [{"id": FASTP, "version": "1.3.7+galaxy0"}], "error": None,
+        "created_at": "2026-10-09T10:02:00Z", "updated_at": "2026-10-09T10:09:30Z"}})

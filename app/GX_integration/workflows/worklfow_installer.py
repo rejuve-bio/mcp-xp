@@ -2,7 +2,6 @@ import logging
 import asyncio
 import traceback
 
-import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,9 +9,8 @@ load_dotenv()
 from sys import path
 path.append('.')
 
-from bioblend.galaxy.toolshed import ToolShedClient
-
 from app.galaxy import GalaxyClient
+from app.GX_integration import toolshed
 from app.api.socket_manager import SocketManager
 from app.enumerations import (
     NumericLimits,
@@ -23,7 +21,7 @@ from app.enumerations import (
 class WorkflowInstaller:
     """Handles tool installation and workflow upload operations"""
 
-    UNHEALTHY_REPOSITORY_STATUSES = {"Error", "Uninstalled", "New"}
+    UNHEALTHY_REPOSITORY_STATUSES = toolshed.UNHEALTHY_REPOSITORY_STATUSES
     
     def __init__(self, galaxy_client: GalaxyClient):
 
@@ -31,47 +29,19 @@ class WorkflowInstaller:
 
         self.gi_object=self.galaxy_client.gi_object 
         self.gi_admin = self.galaxy_client.gi_admin # For administrative functionalitites like toolshed instantiation and tool installing
-        self.toolshed=ToolShedClient(self.gi_admin.gi)    # Toolshed instance
+        self.toolshed = self.gi_admin.gi.toolshed  # Galaxy's ToolShed client, on the admin key
 
         self.log = logging.getLogger(__class__.__name__)
     
     
-    async def _install_galaxy_tool(self, toolshed_info, checker = False):
+    async def _install_galaxy_tool(self, toolshed_info):
         """install a tool to galaxy using a toolshed information of a galaxy worklfow ga file."""
-        
-        try:
-            
-            install_result = await asyncio.to_thread( self.toolshed.install_repository_revision,
-                                tool_shed_url=f'https://{toolshed_info["tool_shed"]}',
-                                name=toolshed_info["name"],
-                                owner=toolshed_info["owner"],
-                                changeset_revision=toolshed_info["changeset_revision"],
-                                install_tool_dependencies=True,
-                                install_repository_dependencies=True,
-                                install_resolver_dependencies=True,
-                                tool_panel_section_id=None,
-                                new_tool_panel_section_label=None
-                            )
-            
-        except Exception as e:
-            
-            if not checker:
-                self.log.warning(f"tool installation failed, trying again. {e}")
-                install_result = await self._install_galaxy_tool(toolshed_info, checker = True)
-                return install_result
-            else:
-                self.log.error(f" tool installation failing: {e}")
-                raise
-            
-        return install_result
+        return await toolshed.install_revision(self.toolshed, toolshed_info)
 
     async def _reload_toolbox(self):
         """ Reload the galaxy toolbox. """
-        
-        # Reload the tool box after tools are installed
-        await asyncio.sleep(NumericLimits.SHORT_SLEEP)
-        await asyncio.to_thread(self.gi_admin.gi.config.reload_toolbox)
-        
+        await toolshed.reload_toolbox(self.gi_admin.gi)
+
     async def _tool_exists(self, step: dict) -> bool:
         """Checks if a specific version of a tool is installed within the galaxy instance"""
 
@@ -103,94 +73,11 @@ class WorkflowInstaller:
         return True
 
     async def _ensure_repository_installable(self, step: dict, toolshed_info: dict) -> None:
-        """Detect 'ghost installs' and clear the stale DB row so a fresh install runs.
-
-        Galaxy's `tool_shed_repositories` table can mark a repository revision as
-        `Installed` even when files were never downloaded, conda env never resolved,
-        or the install was interrupted. In those cases, `install_repository_revision`
-        silently no-ops because the DB row already exists.
-
-        Galaxy 25.0 has no `repair_repository_revision` endpoint (removed upstream —
-        confirmed against the running instance's `/openapi.json`). The only remedy
-        for a stuck DB row is to DELETE it via `uninstall_repository`, then let the
-        outer `_tool_check_install` re-issue a fresh install with no stale row to
-        no-op against.
-
-        Uninstall side-effects to be aware of:
-        - `remove_from_disk=true` removes files and conda envs for this repo.
-        - Shared dependencies may be cascaded off; if another healthy repo relied on
-          them, they will be reinstalled on next need. That's an accepted cost of
-          clearing the ghost.
-        """
-        try:
-            # gi.toolShed (camelCase) is bioblend's local installed-repos client.
-            # gi.toolshed (lowercase) is for the remote Tool Shed and lacks
-            # installed-repo introspection. (Attribute name varies by bioblend
-            # version; toolShed is what this codebase ships with.)
-            repos = await asyncio.to_thread(
-                self.gi_admin.gi.toolShed.get_repositories
-            )
-            for r in repos:
-                if not (r.get('name') == toolshed_info['name']
-                        and r.get('owner') == toolshed_info['owner']
-                        and r.get('changeset_revision') == toolshed_info['changeset_revision']):
-                    continue
-
-                status = r.get('status', '')
-                tool_actually_present = await self._tool_exists(step)
-
-                repo_deleted = bool(r.get('deleted'))
-                repo_uninstalled = bool(r.get('uninstalled'))
-                needs_cleanup = (
-                    repo_deleted
-                    or repo_uninstalled
-                    or status in self.UNHEALTHY_REPOSITORY_STATUSES
-                    or (status == 'Installed' and not tool_actually_present)
-                )
-
-                if needs_cleanup:
-                    repo_id = r.get('id')
-                    if not repo_id:
-                        self.log.warning(
-                            f"Cannot uninstall {toolshed_info['name']}@{toolshed_info['changeset_revision']}: "
-                            "matching repo row has no 'id' field. Falling through to install attempt."
-                        )
-                        return
-
-                    self.log.warning(
-                        f"Repo {toolshed_info['name']}@{toolshed_info['changeset_revision']} "
-                        f"status='{status}' deleted={repo_deleted} uninstalled={repo_uninstalled} "
-                        f"tool_present={tool_actually_present} — uninstalling stale row"
-                    )
-                    try:
-                        admin_key = self.galaxy_client.admin_api_key
-                        galaxy_url = self.galaxy_client.galaxy_url
-                        # DELETE /api/tool_shed_repositories/{id}
-                        # remove_from_disk=true cleans DB row + files + conda envs.
-                        # See lib/galaxy/webapps/galaxy/api/tool_shed_repositories.py::uninstall_repository
-                        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
-                            resp = await client.delete(
-                                f"{galaxy_url}/api/tool_shed_repositories/{repo_id}",
-                                headers={"x-api-key": admin_key},
-                                params={"remove_from_disk": "true"},
-                            )
-                            resp.raise_for_status()
-                            self.log.info(
-                                f"Uninstall API call succeeded for "
-                                f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}"
-                            )
-                        # Reload so the outer install path's _tool_exists check sees a clean state.
-                        await self._reload_toolbox()
-                    except Exception as uninstall_err:
-                        self.log.warning(
-                            f"Uninstall HTTP call failed for "
-                            f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}: {uninstall_err}. "
-                            f"Falling through to install attempt."
-                        )
-                return
-        except Exception as e:
-            # Best-effort: if we can't enumerate repos, don't block the install path.
-            self.log.debug(f"Repo state check skipped: {e}")
+        """Clear a 'ghost install' of the step's repository so a fresh install runs (see toolshed.clear_ghost_install)."""
+        if await toolshed.clear_ghost_install(self.gi_admin.gi, self.galaxy_client.galaxy_url,
+                                              self.galaxy_client.admin_api_key, toolshed_info,
+                                              lambda: self._tool_exists(step)):
+            await self._reload_toolbox()
 
     # Function that installs tools missing in the galaxy instance for the workflow invocation
     # Need  administrator api
@@ -240,21 +127,18 @@ class WorkflowInstaller:
 
         # Post-install verification: reload toolbox and confirm the exact
         # revision is present. Galaxy may need a moment for conda resolution.
-        for attempt in range(6):  # up to ~60s total
-            await self._reload_toolbox()
-            if await self._tool_exists(step):
-                self.log.info(f"Verified install of {step['tool_id']}")
-                if ws_manager:
-                    await ws_manager.broadcast(
-                        event=SocketMessageEvent.workflow_upload.value,
-                        data={
-                            "type": SocketMessageType.TOOL_INSTALL.value,
-                            "payload": {"message": f"Tool Name: {toolshed_info.get('name', 'N/A')}, installed successfully."}
-                        },
-                        tracker_id=tracker_id,
-                    )
-                return
-            await asyncio.sleep(10)
+        if await toolshed.reload_until_present(self.gi_admin.gi, lambda: self._tool_exists(step)):
+            self.log.info(f"Verified install of {step['tool_id']}")
+            if ws_manager:
+                await ws_manager.broadcast(
+                    event=SocketMessageEvent.workflow_upload.value,
+                    data={
+                        "type": SocketMessageType.TOOL_INSTALL.value,
+                        "payload": {"message": f"Tool Name: {toolshed_info.get('name', 'N/A')}, installed successfully."}
+                    },
+                    tracker_id=tracker_id,
+                )
+            return
 
         msg = (
             f"Tool {step['tool_id']} not present after install + 60s wait. "
