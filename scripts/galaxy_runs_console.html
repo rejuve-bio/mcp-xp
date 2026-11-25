@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Galaxy Runs Console</title>
+<!--
+  Test console for mcp-xp's /v1/galaxy API. Everything shown comes from the API; nothing is hard-coded.
+  Serve it from the same hostname as mcp-xp (DomainCORSMiddleware only allows a matching hostname), e.g.:
+    python3 -m http.server 8766 --bind 127.0.0.1 --directory scripts
+  then open http://localhost:8766/galaxy_runs_console.html with mcp-xp on http://localhost:8895.
+-->
+<style>
+:root {
+  --bg: #f5f5f2; --panel: #ffffff; --ink: #1c1d1a; --muted: #676a62; --line: #dedfd8;
+  --accent: #3b5bab; --accent-soft: #e7ecf7; --user: #ecede6; --well: #f0f1ec;
+  --ok: #2d7a43; --ok-soft: #e2f2e6; --bad: #b3322a; --bad-soft: #fae3e0; --warn: #8a5a00; --warn-soft: #fbefd8;
+  --run: #3b5bab; --run-soft: #e7ecf7; --off: #8b8e86; --off-soft: #ecece8; --scrim: rgba(20, 22, 18, .35);
+  --f-body: system-ui, -apple-system, "Segoe UI", sans-serif; --f-mono: ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #131412; --panel: #1b1c1a; --ink: #e7e8e2; --muted: #9c9f96; --line: #2f312d; --accent: #9db3ea; --accent-soft: #1f2840;
+  --user: #262823; --well: #222420; --ok: #7fd096; --ok-soft: #173020; --bad: #f2948b; --bad-soft: #3a1c19; --warn: #f0b75c; --warn-soft: #362812;
+  --run: #9db3ea; --run-soft: #1f2840; --off: #8a8d85; --off-soft: #262823; --scrim: rgba(0, 0, 0, .55); color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--f-body); }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 20px 16px 48px; display: grid; gap: 16px; }
+h1 { font-size: 1.5rem; margin: 0; }
+h2 { font-size: 1rem; margin: 0; }
+h3 { font-size: 12px; font-family: var(--f-mono); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 6px; font-weight: 500; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--f-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.panel > .head { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+.panel > .body { padding: 14px; display: grid; gap: 12px; }
+.grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 16px; align-items: start; }
+@media (max-width: 960px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
+.field { display: grid; gap: 4px; min-width: 0; flex: 1 1 200px; }
+.field label { font-size: 13px; font-weight: 600; }
+.field small { color: var(--muted); font-size: 12px; }
+input, select { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); width: 100%; min-width: 0; }
+button { font: inherit; font-size: 14px; border-radius: 6px; padding: 6px 12px; cursor: pointer; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); font-weight: 600; }
+button.small { font-size: 12.5px; padding: 3px 9px; }
+button[disabled] { opacity: .45; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.note { font-size: 13px; color: var(--muted); background: var(--well); border-radius: 6px; padding: 8px 10px; }
+.err { font-family: var(--f-mono); font-size: 12px; background: var(--bad-soft); color: var(--bad); padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.okline { font-size: 13px; color: var(--ok); }
+
+.results { display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
+.result { display: grid; gap: 2px; text-align: left; border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; background: var(--panel); cursor: pointer; }
+.result:hover { border-color: var(--accent); }
+.result .t { font-weight: 600; }
+.kind { font-family: var(--f-mono); font-size: 11px; text-transform: uppercase; color: var(--accent); }
+
+.fields { display: grid; gap: 10px; }
+.entry { display: grid; gap: 4px; }
+.entry .lab { font-size: 13px; font-weight: 600; display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+.entry .path { font-family: var(--f-mono); font-size: 11px; color: var(--muted); font-weight: 400; }
+.entry .fe { font-size: 12px; color: var(--bad); }
+.tag { font-family: var(--f-mono); font-size: 10.5px; padding: 0 6px; border-radius: 4px; background: var(--well); color: var(--muted); }
+
+.msgs { padding: 14px; display: flex; flex-direction: column; gap: 14px; min-height: 420px; }
+.msg { display: grid; gap: 8px; min-width: 0; }
+.who { font-size: 11px; font-family: var(--f-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.card { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
+.card .cbody { padding: 12px 14px; display: grid; gap: 8px; cursor: pointer; text-align: left; border: 0; background: transparent; color: inherit; font: inherit; width: 100%; }
+.card .cbody:hover { background: var(--well); }
+.card .top { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.card .title { font-weight: 700; }
+.card.replaced { opacity: .6; }
+.card.replaced .title { text-decoration: line-through; }
+.rows { display: grid; gap: 3px; margin: 0; }
+.rows div { display: grid; grid-template-columns: minmax(90px, 160px) minmax(0, 1fr); gap: 10px; font-size: 14px; }
+.rows dt { color: var(--muted); }
+.rows dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.unres { font-size: 13px; color: var(--bad); background: var(--bad-soft); border-radius: 6px; padding: 6px 10px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--well); align-items: center; }
+.actions .why { font-size: 12px; color: var(--muted); margin-left: auto; }
+.runcard { border: 1px solid var(--line); border-left: 4px solid var(--run); border-radius: 8px; padding: 10px 12px; display: grid; gap: 8px; background: var(--panel); }
+.runcard.completed { border-left-color: var(--ok); }
+.runcard.failed { border-left-color: var(--bad); }
+.runcard.cancelled { border-left-color: var(--off); }
+.runcard .top { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.badge { font-family: var(--f-mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+.badge.queued, .badge.cancelled { background: var(--off-soft); color: var(--off); }
+.badge.running { background: var(--run-soft); color: var(--run); }
+.badge.completed { background: var(--ok-soft); color: var(--ok); }
+.badge.failed { background: var(--bad-soft); color: var(--bad); }
+.bar { height: 5px; border-radius: 3px; background: var(--well); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--run); }
+.files { display: flex; flex-wrap: wrap; gap: 6px; }
+.file { font-size: 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
+.file .fmt { font-family: var(--f-mono); font-size: 11px; color: var(--muted); }
+.attention { font-size: 13px; color: var(--warn); background: var(--warn-soft); border-radius: 6px; padding: 6px 10px; }
+
+.log { max-height: 340px; overflow-y: auto; display: grid; gap: 4px; }
+.log details { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.log summary { cursor: pointer; padding: 4px 8px; font-family: var(--f-mono); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.log pre { margin: 0; padding: 8px; font-family: var(--f-mono); font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; border-top: 1px solid var(--line); max-height: 260px; overflow-y: auto; }
+.code-ok { color: var(--ok); } .code-bad { color: var(--bad); }
+
+.scrim { position: fixed; inset: 0; background: var(--scrim); }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 100%); background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 16px 18px 24px; display: grid; gap: 14px; align-content: start; }
+.drawer .dhead { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; font-size: 14px; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.settings { display: grid; gap: 2px; font-size: 14px; }
+.settings .sec { font-weight: 600; margin-top: 8px; }
+.settings .r { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 3px 0; border-bottom: 1px dashed var(--line); }
+.settings .r span:last-child { font-family: var(--f-mono); font-size: 12.5px; text-align: right; overflow-wrap: anywhere; }
+.settings .d { color: var(--muted); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header style="display:grid;gap:6px">
+    <h1>Galaxy Runs Console</h1>
+    <p class="muted">Tests mcp-xp's <span class="mono">/v1/galaxy</span> API end to end. The left side stands in for the assistant (which would fill inputs from the chat); the right side is the thread as the app would show it: cards with Run and Open in Galaxy, run cards with live status, and the thread's files. Every value comes from the API.</p>
+  </header>
+
+  <section class="panel" aria-label="Connection">
+    <div class="head"><h2>Connection</h2><span class="mono muted" id="connState">not checked</span></div>
+    <div class="body">
+      <div class="row">
+        <div class="field"><label for="base">mcp-xp URL</label><input id="base" type="url" placeholder="http://localhost:8895" autocomplete="off"></div>
+        <div class="field"><label for="cred">Bearer JWT, or your Galaxy API key</label><input id="cred" type="password" autocomplete="off" placeholder="eyJ… or a Galaxy API key"><small>Kept in this page only. A plain API key is wrapped in an unsigned JWT, which works only because mcp-xp does not check signatures yet.</small></div>
+        <div class="field" style="flex:0 1 220px"><label for="email">Email (optional)</label><input id="email" type="email" autocomplete="off"><small>Lets mcp-xp refresh an expired key.</small></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="thread">Thread id</label><input id="thread" class="mono" autocomplete="off"><small>One chat conversation. Its Galaxy history is created the first time a tool is described for it.</small></div>
+        <button id="newThread">New thread</button>
+        <button id="connect" class="primary">Connect</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="grid">
+    <div style="display:grid;gap:16px;min-width:0">
+      <section class="panel" aria-label="Find a tool or workflow">
+        <div class="head"><h2>1 · Find a tool or workflow</h2><span class="tag">assistant stand-in</span></div>
+        <div class="body">
+          <form class="row" id="searchForm">
+            <div class="field"><label for="q">Search installed tools and workflows</label><input id="q" autocomplete="off" placeholder="What do you want to run?"></div>
+            <div class="field" style="flex:0 1 140px"><label for="kind">Kind</label><select id="kind"><option value="">Both</option><option value="tool">Tools</option><option value="workflow">Workflows</option></select></div>
+            <button class="primary" type="submit">Search</button>
+          </form>
+          <div class="results" id="results"></div>
+        </div>
+      </section>
+
+      <section class="panel" aria-label="Build a card">
+        <div class="head"><h2>2 · Settle the inputs</h2><span class="tag">assistant stand-in</span></div>
+        <div class="body" id="builder"><p class="muted">Pick a tool or workflow above. Its required inputs, choices and file inputs come from <span class="mono">POST /describe</span>.</p></div>
+      </section>
+
+      <section class="panel" aria-label="Request log">
+        <div class="head"><h2>Request log</h2><button class="small" id="clearLog">Clear</button></div>
+        <div class="body"><div class="log" id="log"></div></div>
+      </section>
+    </div>
+
+    <div style="display:grid;gap:16px;min-width:0">
+      <section class="panel" aria-label="Thread">
+        <div class="head"><h2>Thread</h2><span class="mono muted" id="pollState">no active runs</span></div>
+        <div class="msgs" id="msgs"><p class="muted">Cards and runs for this thread appear here.</p></div>
+      </section>
+      <section class="panel" aria-label="Thread files">
+        <div class="head"><h2>Thread files</h2><button class="small" id="refreshFiles">Refresh</button></div>
+        <div class="body">
+          <form class="row" id="uploadForm">
+            <div class="field"><label for="upFile">Upload a file into this thread</label><input id="upFile" type="file"></div>
+            <div class="field" style="flex:0 1 180px"><label for="upFormat">Format (optional)</label><input id="upFormat" placeholder="e.g. fastqsanger.gz" autocomplete="off"><small>Galaxy detects it when left empty.</small></div>
+            <button class="primary" type="submit">Upload</button>
+          </form>
+          <div id="upState"></div>
+          <div id="files" class="files"><span class="muted">Connect to list the thread history's files.</span></div>
+          <p class="note"><span class="mono">POST /v1/datasets/upload</span> streams the file into the thread's Galaxy history and answers at once with state <span class="mono">queued</span>; the list below shows it turning <span class="mono">ok</span>. Each file has Preview (a <span class="mono">Range</span> request, 206) and Download (<span class="mono">GET /v1/datasets/{id}/download</span>).</p></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div id="overlay" hidden><div class="scrim" id="scrim"></div><aside class="drawer" id="drawer" role="dialog" aria-label="Details"></aside></div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const el = h => { const d = document.createElement("div"); d.innerHTML = h.trim(); return d.firstElementChild; };
+  const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, c => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)));
+  const FINAL = new Set(["completed", "failed", "cancelled"]);
+
+  const S = { base: "", token: "", thread: "", files: [], proposals: [], runs: new Map(), runMsgs: new Map(), pollTimer: null, pN: 0 };
+
+  // ---------------------------------------------------------------- settings (base URL and thread only; never the credential)
+  try {
+    $("base").value = localStorage.getItem("grc.base") || "";
+    $("thread").value = localStorage.getItem("grc.thread") || "";
+  } catch (e) { /* storage unavailable */ }
+  if (!$("thread").value) $("thread").value = uuid();
+  const remember = () => { try { localStorage.setItem("grc.base", $("base").value.trim()); localStorage.setItem("grc.thread", $("thread").value.trim()); } catch (e) {} };
+
+  function b64url(obj) {
+    const bytes = new TextEncoder().encode(JSON.stringify(obj));
+    let s = ""; bytes.forEach(b => s += String.fromCharCode(b));
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function makeToken(cred, email) {
+    if (cred.split(".").length === 3) return cred;
+    const claims = { galaxy_api_token: cred };
+    if (email) claims.email = email;
+    return `${b64url({ alg: "HS256", typ: "JWT" })}.${b64url(claims)}.unsigned`;
+  }
+
+  // ---------------------------------------------------------------- API with a request log
+  async function api(method, path, body) {
+    const url = S.base + path;
+    const started = performance.now();
+    let status = 0, data = null, text = "";
+    try {
+      const res = await fetch(url, {
+        method, headers: { "Authorization": `Bearer ${S.token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      status = res.status;
+      text = await res.text();
+      try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+    } catch (e) {
+      text = String(e);
+      data = { detail: `Could not reach ${url}. Is mcp-xp running, and is this page served from the same hostname? (${e.message})` };
+    }
+    logEntry(method, path, body, status, data, Math.round(performance.now() - started));
+    return { status, data, ok: status >= 200 && status < 300 };
+  }
+  function logEntry(method, path, body, status, data, ms) {
+    const cls = status >= 200 && status < 300 ? "code-ok" : "code-bad";
+    const d = el(`<details><summary><span class="${cls}">${status || "ERR"}</span><span>${esc(method)} ${esc(path)}</span><span class="muted">${ms} ms</span></summary><pre></pre></details>`);
+    d.querySelector("pre").textContent = (body ? "Request\n" + JSON.stringify(body, null, 2) + "\n\n" : "") + "Response\n" + JSON.stringify(data, null, 2);
+    $("log").prepend(d);
+  }
+  const detail = r => typeof r.data === "object" && r.data && "detail" in r.data
+    ? (typeof r.data.detail === "string" ? r.data.detail : JSON.stringify(r.data.detail, null, 2)) : JSON.stringify(r.data);
+  const enc = encodeURIComponent;
+
+  $("clearLog").addEventListener("click", () => { $("log").innerHTML = ""; });
+  $("newThread").addEventListener("click", () => { $("thread").value = uuid(); remember(); resetThread(); });
+
+  function resetThread() {
+    S.proposals = []; S.runs.clear(); S.runMsgs.clear();
+    $("msgs").innerHTML = '<p class="muted">Cards and runs for this thread appear here.</p>';
+    $("files").innerHTML = '<span class="muted">No files yet.</span>';
+    clearTimeout(S.pollTimer);
+  }
+
+  $("connect").addEventListener("click", async () => {
+    S.base = $("base").value.trim().replace(/\/+$/, "");
+    const cred = $("cred").value.trim();
+    S.thread = $("thread").value.trim();
+    if (!S.base || !cred || !S.thread) { $("connState").textContent = "fill in the URL, credential and thread id"; return; }
+    S.token = makeToken(cred, $("email").value.trim());
+    remember();
+    resetThread();
+    const r = await api("GET", `/v1/galaxy/runs?thread_id=${enc(S.thread)}`);
+    if (!r.ok) { $("connState").textContent = `failed: ${r.status || "network"} · ${detail(r).slice(0, 120)}`; return; }
+    $("connState").textContent = `connected · ${r.data.items.length} run(s) in this thread`;
+    r.data.items.reverse().forEach(run => upsertRun(run, null));
+    loadFiles();
+    schedulePoll();
+  });
+
+  async function loadFiles() {
+    const r = await api("GET", `/v1/galaxy/threads/${enc(S.thread)}/files`);
+    if (!r.ok) { $("files").innerHTML = `<div class="err">${esc(detail(r))}</div>`; return; }
+    S.files = r.data.items;
+    $("files").innerHTML = S.files.length ? "" : '<span class="muted">The thread history has no visible files yet.</span>';
+    S.files.forEach(f => $("files").appendChild(fileChip(f.id, `#${f.hid} ${f.name}`, `${f.src === "hdca" ? f.collection_type : f.format} · ${f.state}`, f.src === "hda" && f.state === "ok")));
+    if (S.files.some(f => f.state && !["ok", "error", "deferred"].includes(f.state))) setTimeout(loadFiles, 3000);
+  }
+
+  // A file chip with Preview (Range request) and Download, for datasets that are ready.
+  function fileChip(id, name, meta, ready) {
+    const c = el(`<span class="file">${esc(name)} <span class="fmt">${esc(meta)}</span></span>`);
+    if (ready) {
+      const pv = el('<button class="small" type="button">Preview</button>');
+      pv.addEventListener("click", () => preview(id, name));
+      const dl = el('<button class="small" type="button">Download</button>');
+      dl.addEventListener("click", () => downloadFile(id, dl));
+      c.append(" ", pv, " ", dl);
+    }
+    return c;
+  }
+
+  async function preview(id, name) {
+    const started = performance.now();
+    let res, text = "";
+    try {
+      res = await fetch(`${S.base}/v1/datasets/${enc(id)}/download`, { headers: { Authorization: `Bearer ${S.token}`, Range: "bytes=0-2047" } });
+      text = await res.text();
+    } catch (e) { text = String(e); }
+    logEntry("GET", `/v1/datasets/${id}/download  (Range: bytes=0-2047)`, null, res ? res.status : 0,
+      { "content-range": res && res.headers.get("content-range"), "content-disposition": res && res.headers.get("content-disposition"), first_bytes: text.slice(0, 300) },
+      Math.round(performance.now() - started));
+    openDrawer(`<div class="dhead"><div><h2>${esc(name)}</h2><div class="mono muted">HTTP ${res ? res.status : "error"} · ${esc(res && res.headers.get("content-range") || "whole file")}</div></div><button data-close>Close</button></div>
+      <p class="note">The first 2 KB, fetched with <span class="mono">Range: bytes=0-2047</span>. A genome browser or table view reads a large file the same way, one region or page at a time.</p>
+      <pre class="mono" style="white-space:pre-wrap;margin:0;max-height:60vh;overflow:auto">${esc(text)}</pre>`);
+  }
+
+  async function downloadFile(id, button) {
+    button.disabled = true; button.textContent = "Downloading…";
+    try {
+      const res = await fetch(`${S.base}/v1/datasets/${enc(id)}/download`, { headers: { Authorization: `Bearer ${S.token}` } });
+      logEntry("GET", `/v1/datasets/${id}/download`, null, res.status, { "content-disposition": res.headers.get("content-disposition"), "content-length": res.headers.get("content-length") }, 0);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const cd = res.headers.get("content-disposition") || "";
+      const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="([^"]+)"/);
+      const url = URL.createObjectURL(await res.blob());
+      const a = el(`<a href="${url}" download="${esc(m ? decodeURIComponent(m[1]) : id)}">save</a>`);
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      button.textContent = "Downloaded";
+    } catch (e) {
+      button.textContent = `Failed: ${e.message}`;
+    }
+    setTimeout(() => { button.disabled = false; button.textContent = "Download"; }, 3000);
+  }
+
+  $("uploadForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const file = $("upFile").files[0];
+    if (!file || !S.token) { $("upState").innerHTML = '<p class="muted">Connect, then choose a file.</p>'; return; }
+    const form = new FormData();
+    form.append("thread_id", S.thread);  // before the file, as the route requires
+    form.append("file", file);
+    if ($("upFormat").value.trim()) form.append("format", $("upFormat").value.trim());
+    $("upState").innerHTML = `<p class="muted">Uploading ${esc(file.name)} (${file.size} bytes)…</p>`;
+    const started = performance.now();
+    let status = 0, data;
+    try {
+      const res = await fetch(`${S.base}/v1/datasets/upload`, { method: "POST", headers: { Authorization: `Bearer ${S.token}` }, body: form });
+      status = res.status; data = await res.json();
+    } catch (err) { data = { detail: String(err) }; }
+    logEntry("POST", "/v1/datasets/upload", { thread_id: S.thread, file: file.name, format: $("upFormat").value.trim() || undefined }, status, data, Math.round(performance.now() - started));
+    $("upState").innerHTML = status === 201
+      ? `<p class="okline">Uploaded: dataset <span class="mono">${esc(data.id)}</span>, ${esc(data.size)} bytes, state ${esc(data.state)}, format ${esc(data.format)}.</p>`
+      : `<div class="err">${esc(status)} · ${esc(JSON.stringify(data.detail ?? data))}</div>`;
+    loadFiles();
+  });
+  $("refreshFiles").addEventListener("click", loadFiles);
+
+  // ---------------------------------------------------------------- 1. search
+  $("searchForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const q = $("q").value.trim();
+    if (!q || !S.token) return;
+    const kind = $("kind").value;
+    const r = await api("GET", `/v1/galaxy/search?q=${enc(q)}${kind ? `&kind=${kind}` : ""}`);
+    if (!r.ok) { $("results").innerHTML = `<div class="err">${esc(detail(r))}</div>`; return; }
+    $("results").innerHTML = r.data.items.length ? "" : '<p class="muted">Nothing installed matches.</p>';
+    r.data.items.forEach(item => {
+      const b = el(`<button class="result"><span class="kind">${esc(item.type)}</span><span class="t">${esc(item.name)} <span class="muted mono">${esc(item.version || "")}</span></span><span class="muted" style="font-size:13px">${esc(item.description || "")}</span><span class="mono muted">${esc(item.id)}</span></button>`);
+      b.addEventListener("click", () => openBuilder({ type: item.type, id: item.id, version: item.version || null }));
+      $("results").appendChild(b);
+    });
+  });
+
+  // ---------------------------------------------------------------- 2. builder (stands in for the assistant's questions)
+  async function openBuilder(target, previous) {
+    const box = $("builder");
+    box.innerHTML = '<p class="muted">Describing…</p>';
+    const body = { thread_id: S.thread, target };
+    const [trim, full] = await Promise.all([api("POST", "/v1/galaxy/describe", body), api("POST", "/v1/galaxy/describe?full=true", body)]);
+    if (!trim.ok || !full.ok) { box.innerHTML = `<div class="err">${esc(detail(trim.ok ? full : trim))}</div>`; return; }
+    await loadFiles();
+    const desc = trim.data;
+    const values = previous ? { ...previous.inputs } : {};
+    // Conditional choices start at Galaxy's default.
+    desc.inputs.filter(e => e.selector && values[e.path] === undefined && e.default != null).forEach(e => { values[e.path] = e.default; });
+
+    box.innerHTML = `
+      <div><div class="kind">${esc(desc.target.type)}</div><strong>${esc(desc.target.name)}</strong> <span class="mono muted">${esc(desc.target.version || "")}</span>
+        <div class="mono muted">${esc(desc.target.id)}</div></div>
+      <p class="note">Console text: the short describe response lists ${desc.inputs.filter(e => e.type !== "repeat").length} of the tool's ${desc.all_count} settings (<span class="mono">inputs</span> vs <span class="mono">all_count</span>)${desc.inputs.some(e => e.type === "repeat") ? ", plus repeated blocks" : ""}. Settings it leaves out stay at Galaxy's defaults.</p>
+      <div class="fields" id="fields"></div>
+      <div id="vstate"></div>
+      <div class="row"><button id="validate">Validate</button><button class="primary" id="propose">${previous ? "Post replacing card" : "Post card"}</button></div>`;
+
+    const errors = {};
+    const visible = e => !e.when || Object.entries(e.when).every(([p, v]) => (Array.isArray(v) ? v : [v]).map(String).includes(String(values[p])));
+    const fileChoices = e => {
+      const fromMatches = (e.matches || []).map(m => ({ ...m }));
+      const extra = S.files.filter(f => (e.type === "data_collection" ? f.src === "hdca" : true) && !fromMatches.some(m => m.id === f.id && m.src === f.src));
+      return fromMatches.concat(extra.map(f => ({ src: f.src, id: f.id, name: f.name, hid: f.hid, unmatched: true })));
+    };
+    function render() {
+      const f = $("fields");
+      f.innerHTML = "";
+      desc.inputs.filter(visible).forEach(e => {
+        const err = errors[e.path] ? `<span class="fe">${esc(errors[e.path])}</span>` : "";
+        const tags = [e.type, e.optional ? "optional" : "required", e.selector ? "choice" : "", e.when ? "branch" : ""].filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join("");
+        const wrap = el(`<div class="entry"><div class="lab">${esc(e.label)} ${tags} <span class="path">${esc(e.path)}</span></div>${err}</div>`);
+        let ctl;
+        if (e.type === "repeat") {
+          ctl = el(`<p class="note">Repeated block (min ${esc(e.min)}${e.max ? `, max ${esc(e.max)}` : ""}). The spec leaves repeats to Open in Galaxy.</p>`);
+        } else if (e.type === "data" || e.type === "data_collection") {
+          const choices = fileChoices(e);
+          const cur = values[e.path];
+          ctl = el(`<select><option value="">— not set —</option>${choices.map((c, i) => `<option value="${i}" ${cur && cur.id === c.id && cur.src === c.src ? "selected" : ""}>#${esc(c.hid)} ${esc(c.name)} (${c.src === "hdca" ? "collection" : "dataset"}${c.unmatched ? ", not offered by Galaxy" : ""})</option>`).join("")}</select>`);
+          ctl.addEventListener("change", () => { const c = choices[+ctl.value]; if (ctl.value === "") delete values[e.path]; else values[e.path] = { src: c.src, id: c.id }; });
+          if (!choices.length) wrap.appendChild(el('<small class="muted">No files in the thread history fit. Upload some in Galaxy, then refresh.</small>'));
+        } else if (e.options && e.options.length) {
+          const cur = values[e.path] ?? (e.selector ? e.default : "");
+          ctl = el(`<select>${e.selector ? "" : `<option value="">— Galaxy default${e.default != null && e.default !== "" ? ` (${esc(e.default)})` : ""} —</option>`}${e.options.map(o => `<option ${String(o) === String(cur) ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`);
+          ctl.addEventListener("change", () => { if (ctl.value === "") delete values[e.path]; else values[e.path] = ctl.value; if (e.selector) render(); });
+        } else if (e.type === "boolean") {
+          ctl = el(`<select><option value="">— Galaxy default (${esc(e.default)}) —</option><option value="true">true</option><option value="false">false</option></select>`);
+          if (values[e.path] !== undefined) ctl.value = String(values[e.path]);
+          ctl.addEventListener("change", () => { if (ctl.value === "") delete values[e.path]; else values[e.path] = ctl.value === "true"; });
+        } else {
+          const numeric = e.type === "integer" || e.type === "float";
+          ctl = el(`<input ${numeric ? 'type="number" step="any"' : 'type="text"'} placeholder="${e.default != null && e.default !== "" ? `Galaxy default: ${esc(e.default)}` : ""}">`);
+          if (values[e.path] !== undefined) ctl.value = values[e.path];
+          ctl.addEventListener("input", () => { const v = ctl.value; if (v === "") delete values[e.path]; else values[e.path] = numeric ? Number(v) : v; });
+        }
+        wrap.appendChild(ctl);
+        f.appendChild(wrap);
+      });
+      if (!f.children.length) f.appendChild(el('<p class="muted">Nothing to decide: every setting has a default.</p>'));
+    }
+    render();
+
+    const currentInputs = () => Object.fromEntries(Object.entries(values).filter(([p]) => { const e = desc.inputs.find(x => x.path === p); return !e || visible(e); }));
+    async function validate() {
+      const r = await api("POST", "/v1/galaxy/validate", { thread_id: S.thread, target, inputs: currentInputs(), parameters: {} });
+      Object.keys(errors).forEach(k => delete errors[k]);
+      if (!r.ok) { $("vstate").innerHTML = `<div class="err">${esc(detail(r))}</div>`; return null; }
+      Object.assign(errors, r.data.errors || {});
+      $("vstate").innerHTML = r.data.valid ? '<p class="okline">Galaxy accepts these inputs.</p>'
+        : `<div class="err">${Object.entries(r.data.errors).map(([p, m]) => `${p}: ${m}`).map(esc).join("\n")}</div>`;
+      render();
+      return r.data;
+    }
+    $("validate").addEventListener("click", validate);
+    $("propose").addEventListener("click", async () => {
+      const v = await validate();
+      if (!v) return;
+      const blocking = Object.entries(v.errors || {}).filter(([, m]) => m !== "Required");
+      if (blocking.length) { $("vstate").prepend(el('<p class="muted">Fix the rejected inputs first; only missing required inputs may stay unresolved on a card.</p>')); return; }
+      postCard(target, desc, full.data, currentInputs(), Object.keys(v.errors || {}), previous);
+      box.innerHTML = '<p class="muted">Card posted. Pick another tool above, or use "Change" on a card to replace it.</p>';
+    });
+  }
+
+  // ---------------------------------------------------------------- cards (the proposal part)
+  function display(value, files) {
+    if (value && typeof value === "object" && value.src) {
+      const f = files.find(x => x.id === value.id && x.src === value.src);
+      return f ? `${f.name} (${value.src === "hdca" ? "collection" : "dataset"})` : `${value.src} ${value.id}`;
+    }
+    return String(value);
+  }
+  function postCard(target, desc, full, inputs, unresolved, previous) {
+    const byPath = Object.fromEntries(full.inputs.map(e => [e.path, e]));
+    const activeFull = full.inputs.filter(e => e.type !== "repeat" && (!e.when || Object.entries(e.when).every(([p, v]) => (Array.isArray(v) ? v : [v]).map(String).includes(String(inputs[p] ?? (byPath[p] || {}).default)))));
+    const summary = Object.entries(inputs).map(([p, v]) => [(byPath[p] || {}).label || p, display(v, S.files)]);
+    const all_values = activeFull.map(e => ({ section: e.section || "Inputs", label: e.label, value: inputs[e.path] !== undefined ? display(inputs[e.path], S.files) : (e.default ?? ""), default: inputs[e.path] === undefined }));
+    const repeats = desc.inputs.filter(e => e.type === "repeat" && (e.min || 0) > 0).map(e => e.label);
+    const card = {
+      pid: `prop_${++S.pN}_${uuid().slice(0, 6)}`, target: desc.target, inputs, parameters: {},
+      summary, all_values, defaults_count: all_values.filter(v => v.default).length,
+      unresolved: unresolved.map(p => (byPath[p] || {}).label || p).concat(repeats), replaces: previous ? previous.pid : null, replacedBy: null, runs: 0, describe: desc
+    };
+    if (previous) previous.replacedBy = card.pid;
+    S.proposals.push(card);
+    if ($("msgs").querySelector("p.muted")) $("msgs").innerHTML = "";
+    const m = el(`<div class="msg"><div class="who">Assistant</div><div>${previous ? "Here is the changed card." : `Here is ${esc(card.target.name)}.`}</div></div>`);
+    card.el = el('<div class="card"></div>');
+    m.appendChild(card.el);
+    $("msgs").appendChild(m);
+    refreshCards();
+    m.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  const activeTargets = () => new Set([...S.runs.values()].filter(r => !FINAL.has(r.status)).map(r => r.target && r.target.id));
+  function refreshCards() {
+    const busy = activeTargets();
+    S.proposals.forEach(c => {
+      const replaced = !!c.replacedBy, unres = c.unresolved.length > 0, running = busy.has(c.target.id);
+      const why = replaced ? "Replaced" : unres ? "Run is off until the inputs below are set" : running ? `A ${c.target.name} run is queued or running in this thread` : c.runs ? `Ran ${c.runs} time${c.runs > 1 ? "s" : ""}` : "";
+      c.el.className = "card" + (replaced ? " replaced" : "");
+      c.el.innerHTML = `
+        <button class="cbody"><div class="top"><span class="title">${esc(c.target.name)}</span><span class="mono muted">${replaced ? "replaced" : esc(c.pid)}</span></div>
+          <dl class="rows">${c.summary.length ? c.summary.map(([l, v]) => `<div><dt>${esc(l)}</dt><dd>${esc(v)}</dd></div>`).join("") : '<div><dt>Settings</dt><dd>all at Galaxy defaults</dd></div>'}</dl>
+          ${unres ? `<div class="unres">Not set: ${c.unresolved.map(esc).join("; ")}</div>` : ""}
+          <div class="muted" style="font-size:13px">Every setting · ${c.defaults_count} at Galaxy defaults</div></button>
+        <div class="actions"><button class="primary" data-a="run" ${replaced || unres || running ? "disabled" : ""}>Run</button><button data-a="open" ${replaced ? "disabled" : ""}>Open in Galaxy</button><button class="small" data-a="change" ${replaced ? "disabled" : ""}>Change</button><span class="why">${esc(why)}</span></div>`;
+      c.el.querySelector(".cbody").addEventListener("click", () => showDetails(c));
+      c.el.querySelector('[data-a="run"]').addEventListener("click", () => pressRun(c));
+      c.el.querySelector('[data-a="open"]').addEventListener("click", () => openInGalaxy(c));
+      c.el.querySelector('[data-a="change"]').addEventListener("click", () => { openBuilder({ type: c.target.type, id: c.target.id, version: c.target.version }, c); $("builder").scrollIntoView({ behavior: "smooth" }); });
+    });
+  }
+
+  // Run, as the platform server does it: refuse replaced/unresolved/in-progress, then start with one id per press.
+  async function pressRun(card, reuseId) {
+    if (card.replacedBy || card.unresolved.length) return;
+    const list = await api("GET", `/v1/galaxy/runs?thread_id=${enc(S.thread)}`);
+    if (list.ok) list.data.items.forEach(r => upsertRun(r, null));
+    if (!reuseId && activeTargets().has(card.target.id)) { refreshCards(); return; }
+    const clientRequestId = reuseId || uuid();
+    const r = await api("POST", "/v1/galaxy/runs", {
+      thread_id: S.thread, proposal_id: card.pid, client_request_id: clientRequestId,
+      target: { type: card.target.type, id: card.target.id, version: card.target.version }, inputs: card.inputs, parameters: card.parameters
+    });
+    if (!r.ok) {
+      const m = el(`<div class="msg"><div class="who">Run</div><div class="err">${esc(r.status)} · ${esc(detail(r))}</div></div>`);
+      $("msgs").appendChild(m); m.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (r.status === 200) note(`Same request id sent again: mcp-xp answered 200 with the stored run ${r.data.id} and started nothing.`);
+    if (!S.runs.has(r.data.id)) card.runs++;
+    upsertRun(r.data, clientRequestId);
+    refreshCards();
+    schedulePoll(true);
+  }
+  function note(text) {
+    const m = el(`<div class="msg"><div class="who">Console</div><p class="note">${esc(text)}</p></div>`);
+    $("msgs").appendChild(m); m.scrollIntoView({ block: "nearest" });
+  }
+
+  function upsertRun(run, clientRequestId) {
+    S.runs.set(run.id, run);
+    let m = S.runMsgs.get(run.id);
+    if (!m) {
+      if ($("msgs").querySelector("p.muted")) $("msgs").innerHTML = "";
+      m = el('<div class="msg"><div class="who">Run</div></div>');
+      m.dataset.req = clientRequestId || run.client_request_id || "";
+      S.runMsgs.set(run.id, m);
+      $("msgs").appendChild(m);
+      m.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    const p = run.progress || {};
+    const workflow = run.target && run.target.type === "workflow";
+    const done = workflow ? p.steps_done : p.jobs_done, total = workflow ? p.steps_total : p.jobs_total;
+    m.innerHTML = '<div class="who">Run</div>';
+    const c = el(`<div class="runcard ${esc(run.status)}">
+      <div class="top"><span><strong>${esc(run.target && run.target.name)}</strong> <span class="mono muted">${esc(run.id)} · from ${esc(run.proposal_id)}</span></span><span class="badge ${esc(run.status)}">${esc(run.status)}</span></div>
+      ${run.galaxy_state === "paused" ? '<div class="attention">Needs attention in Galaxy</div>' : ""}
+      ${run.error ? `<div class="err">${run.error.step ? esc(run.error.step) + ": " : ""}${esc(run.error.message)}</div>` : ""}
+      ${total ? `<div class="bar"><i style="width:${Math.round(100 * (done || 0) / total)}%"></i></div>` : ""}
+      <div class="mono muted">${done || 0} of ${total || 0} ${workflow ? "steps" : "jobs"} done · galaxy: ${esc(run.galaxy_state)} · updated ${esc(run.updated_at)}</div>
+      <div class="row"><button class="small" data-a="pane">Open run</button><button class="small" data-a="retry" title="Sends POST /runs again with the same client_request_id; mcp-xp should return the stored run with 200">Retry same request</button></div>
+    </div>`);
+    c.querySelector('[data-a="pane"]').addEventListener("click", () => showRun(run.id));
+    c.querySelector('[data-a="retry"]').addEventListener("click", () => {
+      const card = S.proposals.find(x => x.pid === run.proposal_id);
+      if (card) pressRun(card, m.dataset.req || run.client_request_id);
+      else note("The card for this run is not in this console session, so its request can't be resent.");
+    });
+    m.appendChild(c);
+    if (run.outputs && run.outputs.length) {
+      const outs = el('<div class="files"></div>');
+      run.outputs.forEach(o => outs.appendChild(fileChip(o.id, o.name, o.format, true)));
+      m.appendChild(outs);
+    }
+  }
+
+  // ---------------------------------------------------------------- live status: poll while a run is queued or running
+  function schedulePoll(now) {
+    clearTimeout(S.pollTimer);
+    const active = [...S.runs.values()].filter(r => !FINAL.has(r.status));
+    if (!active.length) { $("pollState").textContent = "no active runs"; return; }
+    const oldest = Math.min(...active.map(r => Date.parse(r.created_at) || Date.now()));
+    const age = (Date.now() - oldest) / 1000;
+    const every = now ? 1 : age > 1800 ? 60 : age > 120 ? 15 : 5;
+    $("pollState").textContent = `${active.length} active · next read in ${every} s`;
+    S.pollTimer = setTimeout(poll, every * 1000);
+  }
+  async function poll() {
+    if (document.hidden) { $("pollState").textContent = "paused while the tab is hidden"; return; }
+    const r = await api("GET", `/v1/galaxy/runs?thread_id=${enc(S.thread)}`);
+    if (r.ok) { r.data.items.forEach(run => upsertRun(run, null)); refreshCards(); }
+    if (r.ok) loadFilesQuiet();
+    schedulePoll();
+  }
+  let filesTick = 0;
+  function loadFilesQuiet() { if (++filesTick % 3 === 0) loadFiles(); }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && S.token) schedulePoll(true); });
+
+  // ---------------------------------------------------------------- drawer: details, run pane, Open in Galaxy
+  const overlay = $("overlay"), drawer = $("drawer");
+  function openDrawer(html) { drawer.innerHTML = html; overlay.hidden = false; const b = drawer.querySelector("[data-close]"); b.addEventListener("click", closeDrawer); b.focus(); }
+  function closeDrawer() { overlay.hidden = true; }
+  $("scrim").addEventListener("click", closeDrawer);
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+
+  function showDetails(c) {
+    let sec = "";
+    const settings = c.all_values.map(v => {
+      const head = v.section !== sec ? `<div class="sec">${esc(v.section)}</div>` : ""; sec = v.section;
+      return `${head}<div class="r ${v.default ? "d" : ""}"><span>${esc(v.label)}${v.default ? " · default" : ""}</span><span>${esc(v.value)}</span></div>`;
+    }).join("");
+    const runs = [...S.runs.values()].filter(r => r.proposal_id === c.pid);
+    openDrawer(`
+      <div class="dhead"><div><h2>${esc(c.target.name)}</h2><div class="mono muted">/threads/${esc(S.thread)}/galaxy/proposal/${esc(c.pid)}</div></div><button data-close>Close</button></div>
+      <div><h3>Target</h3><dl class="kv"><dt>Type</dt><dd>${esc(c.target.type)}</dd><dt>Id</dt><dd class="mono">${esc(c.target.id)}</dd><dt>Version</dt><dd class="mono">${esc(c.target.version || "")}</dd></dl></div>
+      <div><h3>What the chat set</h3><dl class="kv">${c.summary.map(([l, v]) => `<dt>${esc(l)}</dt><dd>${esc(v)}</dd>`).join("") || "<dt>—</dt><dd>nothing</dd>"}</dl></div>
+      <div><h3>Every setting · ${c.defaults_count} at Galaxy defaults</h3><div class="settings">${settings}</div></div>
+      <div><h3>Runs from this card</h3>${runs.length ? runs.map(r => `<div class="mono">${esc(r.id)} · ${esc(r.status)}</div>`).join("") : '<p class="muted">None yet.</p>'}</div>
+      <div><h3>Inputs Run will send</h3><pre class="mono" style="white-space:pre-wrap;margin:0">${esc(JSON.stringify(c.inputs, null, 2))}</pre></div>`);
+  }
+
+  async function showRun(runId) {
+    const r = await api("GET", `/v1/galaxy/runs/${enc(runId)}`);
+    if (!r.ok) { openDrawer(`<div class="dhead"><h2>Run</h2><button data-close>Close</button></div><div class="err">${esc(detail(r))}</div>`); return; }
+    const run = r.data;
+    upsertRun(run, null);
+    openDrawer(`
+      <div class="dhead"><div><h2>${esc(run.target && run.target.name)} run</h2><div class="mono muted">${esc(run.id)}</div></div><button data-close>Close</button></div>
+      <dl class="kv"><dt>Status</dt><dd><span class="badge ${esc(run.status)}">${esc(run.status)}</span></dd><dt>Galaxy state</dt><dd class="mono">${esc(run.galaxy_state)}</dd>
+        <dt>Progress</dt><dd class="mono">${esc(JSON.stringify(run.progress))}</dd><dt>History</dt><dd class="mono">${esc(run.history_id)}</dd>
+        <dt>Created</dt><dd class="mono">${esc(run.created_at)}</dd><dt>Updated</dt><dd class="mono">${esc(run.updated_at)}</dd></dl>
+      ${run.galaxy_state === "paused" ? '<div class="attention">Needs attention in Galaxy</div>' : ""}
+      ${run.error ? `<div><h3>Error</h3><div class="err">${run.error.step ? esc(run.error.step) + ": " : ""}${esc(run.error.message)}</div></div>` : ""}
+      <div><h3>Outputs</h3>${run.outputs && run.outputs.length ? `<div class="files">${run.outputs.map(o => `<span class="file">${esc(o.name)} <span class="fmt">${esc(o.format)} · ${esc(o.id)}</span></span>`).join("")}</div>` : '<p class="muted">None yet.</p>'}</div>
+      <div class="row"><button data-a="refresh">Read again</button><button data-a="cancel" ${FINAL.has(run.status) ? "disabled" : ""}>Cancel run</button></div>
+      <p class="note">Cancel is here for testing the route; the spec doesn't put a cancel button in the app.</p>`);
+    drawer.querySelector('[data-a="refresh"]').addEventListener("click", () => showRun(run.id));
+    drawer.querySelector('[data-a="cancel"]').addEventListener("click", async () => {
+      const c = await api("POST", `/v1/galaxy/runs/${enc(run.id)}/cancel`);
+      if (c.ok) { upsertRun(c.data, null); refreshCards(); schedulePoll(true); }
+      showRun(run.id);
+    });
+  }
+
+  async function openInGalaxy(c) {
+    const r = await api("POST", "/v1/galaxy/links", {
+      thread_id: S.thread, proposal_id: c.pid, target: { type: c.target.type, id: c.target.id, version: c.target.version }, inputs: c.inputs, parameters: c.parameters
+    });
+    if (!r.ok) { openDrawer(`<div class="dhead"><h2>Open in Galaxy</h2><button data-close>Close</button></div><div class="err">${esc(detail(r))}</div>`); return; }
+    const safe = /^https?:\/\//i.test(r.data.url);
+    openDrawer(`
+      <div class="dhead"><div><h2>Open in Galaxy</h2><div class="mono muted">${esc(r.data.kind)}</div></div><button data-close>Close</button></div>
+      <div><h3>Link</h3><p class="mono">${esc(r.data.url)}</p></div>
+      ${safe ? `<p><a href="${esc(r.data.url)}" target="_blank" rel="noopener">Open in a new tab</a></p>` : ""}
+      <div><h3>Not carried by the link · set in Galaxy</h3>${r.data.not_carried.length ? r.data.not_carried.map(p => `<div class="mono">${esc(p)}</div>`).join("") : '<p class="muted">Nothing. Every value is in the link.</p>'}</div>
+      <p class="note">You must be signed in to Galaxy as the same user mcp-xp runs as, or the thread's history isn't yours.</p>`);
+  }
+})();
+</script>
+</body>
+</html>
