@@ -5,7 +5,7 @@ Paths are Galaxy's run format: names in the input tree joined with '|', repeat b
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 FILE_TYPES = {"data", "data_collection"}
 SKIP_TYPES = {"hidden", "hidden_data", "baseurl", "upload_dataset"}
@@ -17,13 +17,15 @@ def describe_inputs(model: Dict[str, Any], full: bool = False) -> Dict[str, Any]
 
     Trimmed (the default) keeps required inputs, every conditional's choice, and file inputs.
     full=True keeps every setting, with the section it sits in, for the card's details panel.
-    Inputs that apply in some branches of a conditional only carry "when".
+    Inputs that apply in some branches of a conditional only carry "when". A path can be listed
+    more than once when its branches differ (options, nested conditions); the "when"s never overlap.
     """
     everything = _walk(model.get("inputs", []), prefix="", section=None, when=None)
-    all_count = sum(1 for e in everything if e["type"] != "repeat")
-    if full:
-        return {"inputs": everything, "all_count": all_count}
-    return {"inputs": [e for e in everything if _keep_trimmed(e)], "all_count": all_count}
+    all_count = len({e["path"] for e in everything if e["type"] != "repeat"})
+    kept = everything if full else [e for e in everything if _keep_trimmed(e)]
+    for e in kept:
+        e.pop("_filled", None)
+    return {"inputs": kept, "all_count": all_count}
 
 
 def input_types(model: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -39,7 +41,9 @@ def type_of(types: Dict[str, Dict[str, Any]], path: str) -> Optional[Dict[str, A
 
 
 def _keep_trimmed(entry: Dict[str, Any]) -> bool:
-    if entry["type"] in FILE_TYPES or entry["type"] == "repeat" or entry.get("selector"):
+    # A select Galaxy fills (a reference genome, an index) is a real choice even with a default:
+    # Galaxy's default is just the first entry of the table.
+    if entry["type"] in FILE_TYPES or entry["type"] == "repeat" or entry.get("selector") or entry.get("_filled"):
         return True
     return not entry.get("optional") and _empty(entry.get("default"))
 
@@ -82,6 +86,12 @@ def _leaf(inp: Dict[str, Any], prefix: str, section: Optional[str], when: Option
         entry["multiple"] = True
     if kind in ("select", "genomebuild", "data_column", "drill_down") and isinstance(inp.get("options"), list):
         entry["options"] = [o[1] for o in inp["options"] if isinstance(o, (list, tuple)) and len(o) > 1]
+        if inp.get("is_dynamic") and kind == "select":
+            entry["_filled"] = True  # internal, dropped by describe_inputs
+        if not entry["options"] and inp.get("is_dynamic"):
+            # Filled by Galaxy (a data table, another input's value) and empty here: say so, so an
+            # empty list isn't read as "any value". It may fill once other inputs are chosen.
+            entry["no_options"] = True
     if kind in FILE_TYPES:
         entry["formats"] = inp.get("extensions") or []
         if kind == "data_collection" and inp.get("collection_types"):
@@ -115,28 +125,37 @@ def _conditional(inp: Dict[str, Any], prefix: str, section: Optional[str], when:
     selector_path = selector["path"]
     out = [selector]
 
-    # Merge the branches: an input found in every case applies always, otherwise it gets "when".
+    # Merge the branches. The same path can sit in several cases with different content (other
+    # options, a nested conditional of its own): each distinct copy is kept, with "when" naming the
+    # cases it belongs to. A copy found in every case applies always and gets no condition.
     cases = inp.get("cases") or []
-    by_path: Dict[str, Dict[str, Any]] = {}
-    seen_in: Dict[str, List[Any]] = {}
-    order: List[str] = []
+    variants: Dict[str, List[Tuple[Dict[str, Any], List[Any]]]] = {}
     for case in cases:
         value = case.get("value")
         for e in _walk(case.get("inputs", []), f"{prefix}{name}|", section, when, templates):
-            if e["path"] not in by_path:
-                by_path[e["path"]] = e
-                seen_in[e["path"]] = []
-                order.append(e["path"])
-            seen_in[e["path"]].append(value)
-    for path in order:
-        e = by_path[path]
-        values = seen_in[path]
-        if len(values) < len(cases):
-            cond = dict(e.get("when") or {})
-            cond[selector_path] = values[0] if len(values) == 1 else values
-            e["when"] = cond
-        out.append(e)
+            copies = variants.setdefault(e["path"], [])
+            for kept, values in copies:
+                if _same(kept, e):
+                    values.append(value)
+                    if e.get("matches") and not kept.get("matches"):
+                        kept["matches"] = e["matches"]
+                    break
+            else:
+                copies.append((e, [value]))
+    for copies in variants.values():
+        for e, values in copies:
+            if len(values) < len(cases):
+                cond = dict(e.get("when") or {})
+                cond[selector_path] = values[0] if len(values) == 1 else values
+                e["when"] = cond
+            out.append(e)
     return out
+
+
+def _same(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    """Two branches' copies of one input are the same setting. The datasets Galaxy offers
+    ("matches") don't count: they come from the history, not from the tool."""
+    return {k: v for k, v in a.items() if k != "matches"} == {k: v for k, v in b.items() if k != "matches"}
 
 
 def _repeat(inp: Dict[str, Any], prefix: str, section: Optional[str], when: Optional[Dict[str, Any]],

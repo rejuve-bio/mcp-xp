@@ -65,6 +65,161 @@ def test_describe_full_keeps_every_setting_with_its_section():
     assert d["all_count"] == 5  # selector, in1, in2 and two filter options; hidden and repeat not counted
 
 
+# ---------------------------------------------------------------- an RNA-STAR-like model (#100)
+# The same names (GTFconditional, GTFselect, genomeDir, sjdbGTFfile) sit in several branches with
+# different content; genomeDir is filled from a data table, filtered differently in each branch.
+
+def _select(name, values, dynamic=False, value=None):
+    return {"type": "select", "name": name, "label": name, "optional": False, "is_dynamic": dynamic,
+            "value": value if value is not None else (values[0] if values else None),
+            "options": [[v.upper(), v, i == 0] for i, v in enumerate(values)]}
+
+
+def _gtf_file():
+    return {"type": "data", "name": "sjdbGTFfile", "label": "Gene model", "optional": False,
+            "extensions": ["gtf", "gff3"], "options": {"hda": [], "hdca": []}}
+
+
+def _overhang():
+    return {"type": "integer", "name": "sjdbOverhang", "label": "Overhang", "optional": False, "value": "100"}
+
+
+def _gtf_conditional(cases):
+    values = [v for v, _ in cases]
+    return {"type": "conditional", "name": "GTFconditional", "test_param": _select("GTFselect", values),
+            "cases": [{"value": v, "inputs": inputs} for v, inputs in cases]}
+
+
+def _star_model(no_gtf=("hg38", "mm10"), with_gtf=("hg38_gencode",)):
+    return {"id": "rna_star", "version": "2.7.11b+galaxy1", "name": "RNA STAR", "errors": {}, "inputs": [
+        {"type": "conditional", "name": "refGenomeSource",
+         "test_param": _select("geneSource", ["indexed", "history"]),
+         "cases": [
+             {"value": "indexed", "inputs": [_gtf_conditional([
+                 ("without-gtf-with-gtf", [_select("genomeDir", list(no_gtf), dynamic=True), _gtf_file(), _overhang()]),
+                 ("without-gtf", [_select("genomeDir", list(no_gtf), dynamic=True)]),
+                 ("with-gtf", [_select("genomeDir", list(with_gtf), dynamic=True)]),
+             ])]},
+             {"value": "history", "inputs": [
+                 {"type": "data", "name": "genomeFastaFiles", "label": "Reference", "optional": False,
+                  "extensions": ["fasta"], "options": {"hda": [], "hdca": []}},
+                 _gtf_conditional([("without-gtf", []), ("with-gtf", [_gtf_file(), _overhang()])]),
+             ]},
+         ]},
+    ]}
+
+
+SOURCE = "refGenomeSource|geneSource"
+GTF = "refGenomeSource|GTFconditional|GTFselect"
+
+
+def _variants(d, path):
+    return [e for e in d["inputs"] if e["path"] == path]
+
+
+def test_a_data_table_select_keeps_each_branchs_options():
+    d = describe_inputs(_star_model(), full=True)
+    genome = _variants(d, "refGenomeSource|GTFconditional|genomeDir")
+    assert [(e["options"], e["when"]) for e in genome] == [
+        (["hg38", "mm10"], {SOURCE: "indexed", GTF: ["without-gtf-with-gtf", "without-gtf"]}),
+        (["hg38_gencode"], {SOURCE: "indexed", GTF: "with-gtf"}),
+    ]
+    assert not any(e.get("no_options") for e in genome)
+
+
+def test_a_selector_in_two_branches_keeps_each_branchs_choices():
+    d = describe_inputs(_star_model())
+    assert [(e["options"], e["when"]) for e in _variants(d, GTF)] == [
+        (["without-gtf-with-gtf", "without-gtf", "with-gtf"], {SOURCE: "indexed"}),
+        (["without-gtf", "with-gtf"], {SOURCE: "history"}),
+    ]
+    assert all(e["selector"] for e in _variants(d, GTF))
+
+
+def test_a_nested_input_keeps_its_inner_condition_in_every_outer_branch():
+    d = describe_inputs(_star_model(), full=True)
+    for path in ("refGenomeSource|GTFconditional|sjdbGTFfile", "refGenomeSource|GTFconditional|sjdbOverhang"):
+        assert [e["when"] for e in _variants(d, path)] == [
+            {GTF: "without-gtf-with-gtf", SOURCE: "indexed"},
+            {GTF: "with-gtf", SOURCE: "history"},
+        ]
+
+
+def test_the_same_input_in_every_branch_stays_one_entry_without_a_condition():
+    # fastp's in1 is in both branches; only the datasets Galaxy offers differ, and those are kept
+    d = describe_inputs(TOOL_MODEL)
+    in1 = _variants(d, "single_paired|in1")
+    assert len(in1) == 1 and "when" not in in1[0] and in1[0]["matches"]
+
+
+def test_a_data_table_select_galaxy_offers_nothing_for_says_so():
+    d = describe_inputs(_star_model(no_gtf=()), full=True)
+    genome = _variants(d, "refGenomeSource|GTFconditional|genomeDir")
+    assert [(e["options"], e.get("no_options"), e["when"][GTF]) for e in genome] == [
+        ([], True, ["without-gtf-with-gtf", "without-gtf"]),
+        (["hg38_gencode"], None, "with-gtf"),
+    ]
+    # a static select is never flagged, even an empty one
+    static = describe_inputs({"inputs": [_select("mode", [])]}, full=True)["inputs"][0]
+    assert static["options"] == [] and "no_options" not in static
+
+
+def test_any_tool_with_a_built_in_index_lists_it_hisat2_shape():
+    model = {"inputs": [{"type": "conditional", "name": "reference_genome",
+                         "test_param": _select("source", ["indexed", "history"]),
+                         "cases": [
+                             {"value": "indexed", "inputs": [_select("index", ["hg38", "mm39"], dynamic=True)]},
+                             {"value": "history", "inputs": [
+                                 {"type": "data", "name": "history_item", "label": "Reference", "optional": False,
+                                  "extensions": ["fasta"], "options": {"hda": [], "hdca": []}}]},
+                         ]}]}
+    index = _variants(describe_inputs(model), "reference_genome|index")
+    assert [(e["options"], e["when"]) for e in index] == [(["hg38", "mm39"], {"reference_genome|source": "indexed"})]
+
+
+async def test_describe_route_keeps_no_options_and_every_branch():
+    gi = _fake_gi()
+    gi.tools.build.return_value = _star_model(no_gtf=())
+    d = await _service(gi).describe("t1", {"type": "tool", "id": "rna_star", "version": "2.7.11b+galaxy1"}, full=True)
+    from app.api.schemas.galaxy_runs import Description
+    out = Description(**d).model_dump(exclude_none=True)
+    genome = [e for e in out["inputs"] if e["path"] == "refGenomeSource|GTFconditional|genomeDir"]
+    assert [(e["options"], e.get("no_options")) for e in genome] == [([], True), (["hg38_gencode"], None)]
+
+
+def test_rna_star_on_dev_lists_the_genome_indexes():
+    # Dev's real build model (refGenomeSource only, no datasets). "with-gtf" is the first case
+    # and has no index on dev; the old first-wins merge returned its empty list for every case.
+    import json
+    from pathlib import Path
+    model = json.loads((Path(__file__).parent / "fixtures" / "rna_star_build_refgenome.json").read_text())
+    genome = _variants(describe_inputs(model), "refGenomeSource|GTFconditional|genomeDir")
+    assert [(len(e["options"]), e.get("no_options"), e["when"][GTF]) for e in genome] == [
+        (0, True, "with-gtf"), (18, None, ["without-gtf-with-gtf", "without-gtf"])]
+    assert {"hg38", "mm10", "dm6"} <= set(genome[1]["options"])
+    quant = _variants(describe_inputs(model, full=True), "refGenomeSource|GTFconditional|quantmode_output|quantMode")
+    assert {len(e["options"]) for e in quant} == {1, 4}
+
+
+def test_all_count_counts_each_setting_once_whatever_its_branches():
+    d = describe_inputs(_star_model(), full=True)
+    assert d["all_count"] == len({e["path"] for e in d["inputs"]}) == 6
+
+
+def test_input_types_and_required_files_read_the_branch_chosen():
+    types = input_types(_star_model())
+    assert type_of(types, "refGenomeSource|GTFconditional|genomeDir")["type"] == "select"
+    from app.galaxy_runs.service import _missing_required_files
+    model = _star_model()
+    # defaults: indexed + without-gtf-with-gtf, which needs a GTF
+    assert _missing_required_files(model, {}) == {"refGenomeSource|GTFconditional|sjdbGTFfile": "Required"}
+    # history + without-gtf: the FASTA only; the indexed branch's default GTFselect must not leak in
+    assert _missing_required_files(model, {SOURCE: "history", GTF: "without-gtf"}) == {
+        "refGenomeSource|genomeFastaFiles": "Required"}
+    assert _missing_required_files(model, {SOURCE: "history"}) == {
+        "refGenomeSource|genomeFastaFiles": "Required"}  # history's own default is without-gtf
+
+
 def test_input_types_cover_repeat_blocks_and_batch_shaping():
     types = input_types(TOOL_MODEL)
     assert type_of(types, "rep_3|x")["type"] == "text"

@@ -827,13 +827,21 @@ def _flatten_errors(errors: Any, prefix: str = "") -> Dict[str, str]:
 def _missing_required_files(model: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, str]:
     """Required file inputs, in the branches the given inputs select, that have no value."""
     entries = describe_inputs(model, full=True)["inputs"]
-    chosen = {e["path"]: inputs.get(e["path"], e.get("default")) for e in entries if e.get("selector")}
+    chosen: Dict[str, Any] = {}
+
+    def applies(e: Dict[str, Any]) -> bool:
+        return all(_matches_when(chosen.get(p), v) for p, v in (e.get("when") or {}).items())
+
+    # A selector can be listed once per branch it sits in, each with its own default; outer
+    # selectors come first, so only the copy in the branch chosen so far counts.
+    for e in entries:
+        if e.get("selector") and e["path"] not in chosen and (e["path"] in inputs or applies(e)):
+            chosen[e["path"]] = inputs.get(e["path"], e.get("default"))
     missing = {}
     for e in entries:
         if e["type"] not in ("data", "data_collection") or e.get("optional"):
             continue
-        applies = all(_matches_when(chosen.get(p), v) for p, v in (e.get("when") or {}).items())
-        if applies and inputs.get(e["path"]) in (None, "", [], {}):
+        if applies(e) and inputs.get(e["path"]) in (None, "", [], {}):
             missing[e["path"]] = "Required"
     return missing
 

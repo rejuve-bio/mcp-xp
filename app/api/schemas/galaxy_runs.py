@@ -100,12 +100,19 @@ class FileMatch(BaseModel):
 
 
 class InputDescription(BaseModel):
+    """One input. A path is listed once per distinct version of it: an input whose branches of a
+    conditional differ (other options, a nested choice) appears once per version, and their "when"s
+    never overlap, so the one whose "when" holds is the one that applies."""
     path: str = Field(..., description="Galaxy's run-format key, e.g. single_paired|in1")
     label: str
     type: str = Field(..., description="Galaxy's input type: data, data_collection, select, integer, text, boolean, repeat …")
     optional: Optional[bool] = None
     default: Any = None
     options: Optional[List[Any]] = None
+    no_options: Optional[bool] = Field(None, description="A select Galaxy fills (from a data table such as genome "
+                                                         "indexes, or from another input) offers nothing here. Not "
+                                                         "'any value': pick another branch, or choose the inputs it "
+                                                         "depends on first and validate")
     formats: Optional[List[str]] = None
     collection_types: Optional[List[str]] = None
     matches: Optional[List[FileMatch]] = Field(None, description="The thread's files Galaxy offers for this input")
@@ -122,7 +129,7 @@ class InputDescription(BaseModel):
 class Description(BaseModel):
     target: TargetOut
     inputs: List[InputDescription]
-    all_count: int = Field(..., description="Every setting the tool or workflow has")
+    all_count: int = Field(..., description="Every setting the tool or workflow has, each path counted once")
 
     model_config = ConfigDict(json_schema_extra={"example": {
         "target": {"type": "tool", "id": FASTP, "version": "1.3.7+galaxy0", "name": "fastp"},
