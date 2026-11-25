@@ -257,6 +257,26 @@ class Dataset(BaseModel):
         "state": "queued", "history_id": "1cd8e2f6b131e891", "created_at": "2026-10-09T10:02:00Z"}})
 
 
+# ---------------------------------------------------------------- ToolShed search (tools not yet installed)
+
+class ToolShedRepository(BaseModel):
+    owner: str
+    name: str
+    description: str
+    changeset_revision: Optional[str] = Field(..., description="Latest installable revision; null when none is")
+    tool_ids: List[str] = Field(..., description="Full ToolShed ids of that revision's tools")
+    installed: bool = Field(..., description="Some revision of this repository is installed on this Galaxy")
+
+
+class ToolShedSearchList(BaseModel):
+    items: List[ToolShedRepository]
+
+    model_config = ConfigDict(json_schema_extra={"example": {"items": [{
+        "owner": "iuc", "name": "fastp", "description": "Fast all-in-one preprocessing for FASTQ files",
+        "changeset_revision": "bca43867b6f4", "tool_ids": ["toolshed.g2.bx.psu.edu/repos/iuc/fastp/fastp/1.4.0+galaxy1"],
+        "installed": False}]}})
+
+
 # ---------------------------------------------------------------- ToolShed installs
 
 class InstallRequest(BaseModel):
