@@ -265,7 +265,10 @@ class ToolShedRepository(BaseModel):
     description: str
     changeset_revision: Optional[str] = Field(..., description="Latest installable revision; null when none is")
     tool_ids: List[str] = Field(..., description="Full ToolShed ids of that revision's tools")
-    installed: bool = Field(..., description="Some revision of this repository is installed on this Galaxy")
+    installed: bool = Field(..., description="The latest installable revision (changeset_revision) is installed "
+                                             "on this Galaxy, so tool_ids can be run")
+    installed_revision: Optional[str] = Field(..., description="The newest revision installed on this Galaxy, maybe "
+                                                               "older than changeset_revision; null when none is")
 
 
 class ToolShedSearchList(BaseModel):
@@ -274,7 +277,7 @@ class ToolShedSearchList(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {"items": [{
         "owner": "iuc", "name": "fastp", "description": "Fast all-in-one preprocessing for FASTQ files",
         "changeset_revision": "bca43867b6f4", "tool_ids": ["toolshed.g2.bx.psu.edu/repos/iuc/fastp/fastp/1.4.0+galaxy1"],
-        "installed": False}]}})
+        "installed": False, "installed_revision": "4990e6f1348f"}]}})
 
 
 # ---------------------------------------------------------------- ToolShed installs

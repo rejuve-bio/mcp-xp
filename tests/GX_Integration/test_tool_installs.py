@@ -156,7 +156,17 @@ def test_an_install_whose_tools_never_show_up_fails():
     assert install["status"] == "failed" and "none of its tools" in install["error"]
 
 
-def test_an_install_past_the_timeout_fails_and_frees_the_revision(monkeypatch):
+def _retry_until_started(client, body, timeout=5):
+    """Ask for the install again until a new one starts."""
+    deadline = time.monotonic() + timeout
+    while True:
+        response = client.post("/v1/galaxy/installs", json=body)
+        if response.status_code != 200 or time.monotonic() > deadline:
+            return response
+        time.sleep(0.02)
+
+
+def test_an_install_past_the_timeout_fails_but_holds_the_revision_until_galaxy_is_done(monkeypatch):
     gi, store = _admin_gi(), InstallMemoryStore()
     release = _blocking(gi)
     with _client(_service(gi, store)) as client:
@@ -165,13 +175,19 @@ def test_an_install_past_the_timeout_fails_and_frees_the_revision(monkeypatch):
         timed_out = client.get(f"/v1/galaxy/installs/{first['id']}").json()
         assert timed_out["status"] == "failed" and "30 minutes" in timed_out["error"]
 
+        # Galaxy is still installing: a second install could remove the repository row it is filling in
         monkeypatch.setattr(installs, "INSTALL_TIMEOUT_SECONDS", 60)
-        again = client.post("/v1/galaxy/installs", json={**BODY, "client_request_id": "req-2"})
-        assert again.status_code == 202 and again.json()["id"] != first["id"]
+        meanwhile = client.post("/v1/galaxy/installs", json={**BODY, "client_request_id": "req-2"})
+        assert meanwhile.status_code == 200 and meanwhile.json()["id"] == first["id"]
+        assert meanwhile.json()["status"] == "failed"
+        assert gi.toolshed.install_repository_revision.call_count == 1
+
         release.set()
+        again = _retry_until_started(client, {**BODY, "client_request_id": "req-2"})
+        assert again.status_code == 202 and again.json()["id"] != first["id"]
         assert _settled(client, again.json()["id"])["status"] == "installed"
         # the first install finishing late doesn't undo its timeout
-        assert _settled(client, first["id"])["status"] == "failed"
+        assert client.get(f"/v1/galaxy/installs/{first['id']}").json()["status"] == "failed"
 
 
 @pytest.mark.parametrize("tool_shed", ["testtoolshed.g2.bx.psu.edu", "https://toolshed.example.org/"])
@@ -211,3 +227,53 @@ def test_without_a_revision_the_newest_installable_one_is_installed(monkeypatch)
 def test_an_unknown_install_is_not_found():
     with _client(_service(_admin_gi(), InstallMemoryStore())) as client:
         assert client.get("/v1/galaxy/installs/install_missing").status_code == 404
+
+
+def test_without_an_admin_key_installs_are_502(caplog):
+    client = SimpleNamespace(gi_client=_fake_gi(), galaxy_url="https://galaxy.example.org", user_api_key="user-key",
+                             gi_admin=None, admin_api_key=None)
+    with _client(GalaxyRuns(client, "alice", InstallMemoryStore(), cache=None)) as api:
+        started = api.post("/v1/galaxy/installs", json=BODY)
+        read = api.get("/v1/galaxy/installs/install_missing")
+    assert started.status_code == 502 and read.status_code == 502
+    assert "GALAXY_API_KEY" in caplog.text
+
+
+def test_a_toolshed_answer_that_is_not_json_is_502(monkeypatch):
+    monkeypatch.setattr(installs, "_default_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, text="<html>Bad gateway</html>"))))
+    body = {k: v for k, v in BODY.items() if k != "changeset_revision"}
+    with _client(_service(_admin_gi(), InstallMemoryStore())) as client:
+        started = client.post("/v1/galaxy/installs", json=body)
+    assert started.status_code == 502 and "ToolShed" in started.json()["detail"]
+
+
+def test_an_install_call_that_errors_but_installs_anyway_is_installed():
+    gi, store = _admin_gi(), InstallMemoryStore()
+    install = gi.toolshed.install_repository_revision.side_effect
+
+    def gateway_timeout(**kw):  # a proxy gives up on the long call while Galaxy carries on
+        install(**kw)
+        raise RuntimeError("504 Gateway Time-out")
+
+    gi.toolshed.install_repository_revision.side_effect = gateway_timeout
+    with _client(_service(gi, store)) as client:
+        installed = _settled(client, client.post("/v1/galaxy/installs", json=BODY).json()["id"])
+    assert installed["status"] == "installed" and installed["error"] is None
+    assert installed["tools"] == [{"id": FASTP_TOOL["id"], "version": "1.3.7+galaxy0"}]
+
+
+def test_an_install_whose_end_cannot_be_saved_logs_why(caplog):
+    class FailingStore(InstallMemoryStore):
+        async def save_install(self, install):
+            if install["status"] != "installing":
+                raise RuntimeError("store unreachable")
+            await super().save_install(install)
+
+    with _client(_service(_admin_gi(), FailingStore())) as client:
+        client.post("/v1/galaxy/installs", json=BODY)
+        deadline = time.monotonic() + 5
+        while "store unreachable" not in caplog.text and time.monotonic() < deadline:
+            time.sleep(0.02)
+    assert any(r.levelname == "ERROR" and "store unreachable" in r.getMessage() and "install_" in r.getMessage()
+               for r in caplog.records)

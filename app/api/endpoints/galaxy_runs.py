@@ -246,12 +246,16 @@ from app.galaxy_runs.installs import ToolInstalls  # noqa: E402
 
 
 def tool_installs(svc: GalaxyRuns = Depends(galaxy_runs)) -> ToolInstalls:
-    return ToolInstalls(svc)
+    try:
+        return ToolInstalls(svc)
+    except GalaxyRunsError as e:
+        raise _http(e)
 
 
 @router.post("/installs", status_code=202, summary="Install a ToolShed repository; returns at once",
              response_model=Install,
              responses={200: {"model": Install, "description": "That revision is already installing or installed, "
+                                                               "timed out but Galaxy is still at it (retry later), "
                                                                "or a repeat of a client_request_id: nothing started"},
                         **_errors(400, 404)})
 async def start_install(body: InstallRequest, response: Response, installs: ToolInstalls = Depends(tool_installs)):

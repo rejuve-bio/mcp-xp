@@ -1,13 +1,13 @@
 """Find tools on the main ToolShed that may not be installed on this Galaxy yet.
 
 One search call, then two small calls per repository (its installable revisions, then the latest one's tools),
-at most MAX_RESULTS repositories, PARALLEL at a time. Whether a repository is installed comes from Galaxy's
+at most MAX_RESULTS repositories, PARALLEL at a time. Which revisions are installed comes from Galaxy's
 admin list of installed ToolShed repositories.
 """
 
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -42,29 +42,40 @@ async def _get(http: httpx.AsyncClient, path: str, **params) -> Any:
 
 
 async def _latest(http: httpx.AsyncClient, slots: asyncio.Semaphore, owner: str,
-                  name: str) -> Tuple[Optional[str], List[str]]:
-    """The latest installable revision and its tool ids; (None, []) when nothing is installable."""
+                  name: str) -> Tuple[List[str], List[str]]:
+    """The installable revisions, oldest first, and the latest one's tool ids; ([], []) when none is installable."""
     async with slots:
         revisions = await _get(http, "/get_ordered_installable_revisions", owner=owner, name=name)
         if not isinstance(revisions, list) or not revisions:
-            return None, []
+            return [], []
         revision = revisions[-1]
         info = await _get(http, "/get_repository_revision_install_info", owner=owner, name=name,
                           changeset_revision=revision)
     metadata = info[1] if isinstance(info, list) and len(info) > 1 and isinstance(info[1], dict) else {}
-    return revision, [t["guid"] for t in metadata.get("valid_tools") or [] if t.get("guid")]
+    return revisions, [t["guid"] for t in metadata.get("valid_tools") or [] if t.get("guid")]
 
 
-async def _installed(runs: GalaxyRuns) -> Set[Tuple[str, str]]:
-    """(owner, name) of every main-ToolShed repository installed on this Galaxy, any revision."""
+async def _installed(runs: GalaxyRuns) -> Dict[Tuple[str, str], List[str]]:
+    """The installed revisions of every main-ToolShed repository on this Galaxy, by (owner, name)."""
     admin = getattr(runs.client, "gi_admin", None)
     if admin is None:
         log.error("ToolShed search needs GALAXY_API_KEY (admin) to list installed repositories")
         raise GalaxyRunsError(502, "Galaxy failed. Safe to retry.")
     repos = await runs._call(admin.gi.toolshed.get_repositories)
-    return {(r.get("owner"), r.get("name")) for r in repos or []
-            if r.get("tool_shed") == TOOL_SHED and r.get("status") == "Installed"
-            and not r.get("deleted") and not r.get("uninstalled")}
+    installed: Dict[Tuple[str, str], List[str]] = {}
+    for r in repos or []:
+        if (r.get("tool_shed") == TOOL_SHED and r.get("status") == "Installed"
+                and not r.get("deleted") and not r.get("uninstalled")):
+            installed.setdefault((r.get("owner"), r.get("name")), []).append(r.get("changeset_revision"))
+    return installed
+
+
+def _installed_revision(revisions: List[str], installed: List[str]) -> Optional[str]:
+    """The newest installed revision: the latest installable one if installed, else the newest older one."""
+    for revision in reversed(revisions):
+        if revision in installed:
+            return revision
+    return installed[0] if installed else None
 
 
 async def search(runs: GalaxyRuns, q: str, http: HttpFactory = default_http) -> Dict[str, Any]:
@@ -81,8 +92,12 @@ async def search(runs: GalaxyRuns, q: str, http: HttpFactory = default_http) -> 
                 _installed(runs))
     except (_ToolShedDown, KeyError, AttributeError, TypeError):
         raise GalaxyRunsError(502, "The ToolShed could not be reached. Safe to retry.")
-    return {"items": [
-        {"owner": r["repo_owner_username"], "name": r["name"], "description": (r.get("description") or "").strip(),
-         "changeset_revision": revision, "tool_ids": tool_ids,
-         "installed": (r["repo_owner_username"], r["name"]) in installed}
-        for r, (revision, tool_ids) in zip(repos, latest)]}
+    items = []
+    for r, (revisions, tool_ids) in zip(repos, latest):
+        revision = revisions[-1] if revisions else None
+        here = _installed_revision(revisions, installed.get((r["repo_owner_username"], r["name"]), []))
+        items.append({"owner": r["repo_owner_username"], "name": r["name"],
+                      "description": (r.get("description") or "").strip(), "changeset_revision": revision,
+                      "tool_ids": tool_ids, "installed": revision is not None and here == revision,
+                      "installed_revision": here})
+    return {"items": items}

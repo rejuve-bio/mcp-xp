@@ -93,7 +93,7 @@ def _client(seen, down=False, installed=INSTALLED):
     return TestClient(app)
 
 
-def test_search_returns_latest_installable_revision_tools_and_whether_installed():
+def test_search_returns_latest_installable_revision_tools_and_whether_it_is_installed():
     seen = []
     response = _client(seen).get("/v1/galaxy/toolshed/search", params={"q": "fastp"})
 
@@ -101,10 +101,12 @@ def test_search_returns_latest_installable_revision_tools_and_whether_installed(
     assert response.json() == {"items": [
         {"owner": "iuc", "name": "fastp", "description": "Fast all-in-one preprocessing for FASTQ files",
          "changeset_revision": "bca43867b6f4",
-         "tool_ids": ["toolshed.g2.bx.psu.edu/repos/iuc/fastp/fastp/1.4.0+galaxy1"], "installed": True},
+         "tool_ids": ["toolshed.g2.bx.psu.edu/repos/iuc/fastp/fastp/1.4.0+galaxy1"],
+         "installed": False, "installed_revision": "4990e6f1348f"},  # an older revision is installed
         {"owner": "iuc", "name": "fastplong", "description": "Fastplong is used for preprocessing long reads.",
          "changeset_revision": "085d03d88643",
-         "tool_ids": ["toolshed.g2.bx.psu.edu/repos/iuc/fastplong/fastplong/0.3.0+galaxy0"], "installed": False},
+         "tool_ids": ["toolshed.g2.bx.psu.edu/repos/iuc/fastplong/fastplong/0.3.0+galaxy0"],
+         "installed": False, "installed_revision": None},
     ]}
     assert parse_qs(urlparse(seen[0]).query)["q"] == ["fastp"]
     assert len(seen) == 1 + 2 * 2  # one search, then two small calls per repository
@@ -124,3 +126,11 @@ def test_toolshed_down_is_502_with_a_short_message():
     response = _client(seen, down=True).get("/v1/galaxy/toolshed/search", params={"q": "fastp"})
     assert response.status_code == 502
     assert response.json() == {"detail": "The ToolShed could not be reached. Safe to retry."}
+
+
+def test_a_repository_whose_latest_revision_is_installed_is_installed():
+    latest = {**INSTALLED[0], "id": "r4", "changeset_revision": "bca43867b6f4"}
+    response = _client([], installed=[INSTALLED[0], latest]).get("/v1/galaxy/toolshed/search", params={"q": "fastp"})
+
+    fastp = response.json()["items"][0]
+    assert fastp["installed"] is True and fastp["installed_revision"] == "bca43867b6f4"
