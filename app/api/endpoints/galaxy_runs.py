@@ -216,3 +216,64 @@ async def download_dataset(dataset_id: str = Path(..., min_length=1, max_length=
         return await datasets.download(svc, dataset_id, range, metadata_file)
     except GalaxyRunsError as e:
         raise _http(e)
+
+
+# ---------------------------------------------------------------- /v1/galaxy/toolshed: tools not yet installed
+
+from app.api.schemas.galaxy_runs import ToolShedSearchList  # noqa: E402
+from app.galaxy_runs import toolshed  # noqa: E402
+
+
+def toolshed_http() -> toolshed.HttpFactory:
+    return toolshed.default_http
+
+
+@router.get("/toolshed/search", summary="Main ToolShed repositories, installed here or not",
+            response_model=ToolShedSearchList, responses=_errors(400))
+async def toolshed_search(q: str = Query(..., min_length=1), svc: GalaxyRuns = Depends(galaxy_runs),
+                          http: toolshed.HttpFactory = Depends(toolshed_http)):
+    """Each repository's latest installable revision and its tool ids. 502 when the ToolShed can't be reached."""
+    try:
+        return await toolshed.search(svc, q, http)
+    except GalaxyRunsError as e:
+        raise _http(e)
+
+
+# ---------------------------------------------------------------- /v1/galaxy/installs: ToolShed installs
+
+from app.api.schemas.galaxy_runs import Install, InstallRequest  # noqa: E402
+from app.galaxy_runs.installs import ToolInstalls  # noqa: E402
+
+
+def tool_installs(svc: GalaxyRuns = Depends(galaxy_runs)) -> ToolInstalls:
+    try:
+        return ToolInstalls(svc)
+    except GalaxyRunsError as e:
+        raise _http(e)
+
+
+@router.post("/installs", status_code=202, summary="Install a ToolShed repository; returns at once",
+             response_model=Install,
+             responses={200: {"model": Install, "description": "That revision is already installing or installed, "
+                                                               "timed out but Galaxy is still at it (retry later), "
+                                                               "or a repeat of a client_request_id: nothing started"},
+                        **_errors(400, 404)})
+async def start_install(body: InstallRequest, response: Response, installs: ToolInstalls = Depends(tool_installs)):
+    try:
+        install, existing = await installs.start(body.owner, body.name, body.changeset_revision,
+                                                 body.client_request_id, body.tool_shed)
+    except GalaxyRunsError as e:
+        raise _http(e)
+    if existing:
+        response.status_code = 200
+    return install
+
+
+@router.get("/installs/{install_id}", summary="An install: installing, installed (with its tools) or failed",
+            response_model=Install, responses=_errors(404))
+async def read_install(install_id: str = Path(..., min_length=1, max_length=64),
+                       installs: ToolInstalls = Depends(tool_installs)):
+    try:
+        return await installs.read(install_id)
+    except GalaxyRunsError as e:
+        raise _http(e)

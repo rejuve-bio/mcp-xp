@@ -130,6 +130,7 @@ class CollectionNames(Enum):
     GALAXY_RUNS = "GalaxyRuns"
     GALAXY_RUN_REQUESTS = "GalaxyRunRequests"
     GALAXY_DATASET_IMPORTS = "GalaxyDatasetImports"
+    GALAXY_TOOL_INSTALLS = "GalaxyToolInstalls"
 
 class IndexingResponses(Enum):
     PENDING_MESSAGE = "Data Indexing in progress."
