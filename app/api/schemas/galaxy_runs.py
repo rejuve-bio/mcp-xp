@@ -150,6 +150,8 @@ class ThreadFile(BaseModel):
     hid: Optional[int] = None
     state: Optional[str] = None
     format: Optional[str] = None
+    genome_build: Optional[str] = Field(None, description="Galaxy's genome build (dbkey), e.g. hg38; null when unset "
+                                                          "and for collections")
     collection_type: Optional[str] = None
 
 
